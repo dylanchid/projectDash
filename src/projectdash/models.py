@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 from typing import List, Optional
 from datetime import datetime
@@ -19,6 +21,16 @@ class Project:
     due_date: str
     cycle: str
 
+
+@dataclass(frozen=True)
+class LinearWorkflowState:
+    id: str
+    name: str
+    type: str
+    team_id: str
+    team_key: str | None = None
+
+
 @dataclass
 class Issue:
     id: str
@@ -27,4 +39,9 @@ class Issue:
     status: str
     assignee: Optional[User] = None
     points: int = 0
+    project_id: Optional[str] = None
+    due_date: Optional[str] = None
+    linear_id: Optional[str] = None
+    team_id: Optional[str] = None
+    state_id: Optional[str] = None
     created_at: datetime = field(default_factory=datetime.now)

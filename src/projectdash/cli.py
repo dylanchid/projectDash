@@ -15,15 +15,19 @@ def main():
     
     # Subcommands
     subparsers.add_parser("sync", help="Sync with Linear")
+    subparsers.add_parser("sync-history", help="Show recent sync history")
     subparsers.add_parser("doctor", help="Check setup and environment")
     subparsers.add_parser("stats", help="Show project statistics")
     subparsers.add_parser("test", help="Run project tests")
     subparsers.add_parser("build", help="Build the project")
+    subparsers.add_parser("dev", help="Run TUI dev mode with auto-restart")
     
     args = parser.parse_args()
     
     if args.command == "sync":
         asyncio.run(sync())
+    elif args.command == "sync-history":
+        asyncio.run(sync_history())
     elif args.command == "doctor":
         doctor()
     elif args.command == "stats":
@@ -32,6 +36,8 @@ def main():
         run_tests()
     elif args.command == "build":
         build_project()
+    elif args.command == "dev":
+        sys.exit(run_dev())
     else:
         # Default: run the TUI
         from projectdash.app import run
@@ -47,7 +53,28 @@ async def sync():
         return
     
     await dm.sync_with_linear()
-    print("✅ Sync complete.")
+    if dm.last_sync_result == "success":
+        print(f"✅ Sync complete. {dm.sync_status_summary()}")
+    else:
+        print(f"❌ Sync failed. {dm.sync_status_summary()}")
+    for line in dm.sync_diagnostic_lines():
+        print(f"   - {line}")
+
+
+async def sync_history():
+    """Show recent persisted sync history."""
+    dm = DataManager()
+    await dm.initialize()
+    history = dm.get_sync_history(limit=20)
+    if not history:
+        print("No sync history found.")
+        return
+    print("🕘 Recent Sync History")
+    for entry in history:
+        print(f"- {entry['created_at']} | {entry['result']} | {entry['summary']}")
+        diagnostics = entry.get("diagnostics") or {}
+        for step, status in diagnostics.items():
+            print(f"   - {step}: {status}")
 
 def doctor():
     """Check for necessary environment variables and files."""
@@ -112,6 +139,27 @@ def build_project():
     except subprocess.CalledProcessError:
         print("❌ Build failed.")
         sys.exit(1)
+
+
+def run_dev() -> int:
+    """Run the dev watcher (auto-restart + Textual dev mode)."""
+    try:
+        import watchfiles  # noqa: F401
+    except ImportError:
+        if os.getenv("PD_DEV_BOOTSTRAPPED") == "1":
+            print("❌ watchfiles is not installed. Run: uv sync --group dev")
+            return 1
+        try:
+            env = dict(os.environ)
+            env["PD_DEV_BOOTSTRAPPED"] = "1"
+            return subprocess.call(["uv", "run", "pd", "dev"], env=env)
+        except FileNotFoundError:
+            print("❌ 'uv' is required for dev bootstrap. Install uv or run from the project venv.")
+            return 1
+
+    from projectdash.dev import main as dev_main
+
+    return dev_main()
 
 if __name__ == "__main__":
     main()

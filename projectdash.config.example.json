@@ -1,0 +1,23 @@
+{
+  "kanban_statuses": ["Todo", "In Progress", "Review", "Done"],
+  "linear_status_mappings": {
+    "todo": "linear-state-id-for-todo",
+    "in progress": "linear-state-id-for-in-progress",
+    "review": "linear-state-id-for-review",
+    "done": "linear-state-id-for-done"
+  },
+  "active_statuses": ["In Progress", "Review"],
+  "done_statuses": ["Done"],
+  "default_user_capacity_points": 10,
+  "workload_warning_pct": 70,
+  "workload_critical_pct": 80,
+  "workload_bar_width": 10,
+  "workload_issue_preview_limit": 3,
+  "timeline_horizon_days": 30,
+  "timeline_max_projects": 6,
+  "seed_mock_data": false,
+  "user_capacity_overrides": {
+    "Alice": 12,
+    "2": 11
+  }
+}

@@ -1,0 +1,255 @@
+Screen {
+    background: #000000;
+    color: #ffffff;
+}
+
+#app-header {
+    height: 3;
+    background: #000000;
+    color: #ffffff;
+    border-bottom: ascii #333333;
+    padding: 1 2;
+}
+
+#view-header {
+    text-style: bold;
+    background: transparent;
+    padding: 1 2;
+    width: 100%;
+    color: #ffffff;
+    border-bottom: ascii #333333;
+    margin-bottom: 1;
+}
+
+#stats-row {
+    height: 8;
+    margin: 0 2;
+    border-bottom: ascii #333333;
+}
+
+.stat-card {
+    width: 33%;
+    height: 7;
+}
+
+.section-label {
+    padding: 1 2 0 2;
+    color: #666666;
+    text-style: bold;
+}
+
+#project-cards-row {
+    height: 10;
+    margin: 0 2;
+}
+
+.project-card {
+    width: 33%;
+    height: 8;
+    padding: 1;
+}
+
+.project-card.is-selected {
+    background: #111111;
+}
+
+#dashboard-layout,
+#timeline-layout,
+#workload-layout {
+    height: 1fr;
+    width: 100%;
+}
+
+#dashboard-main,
+#timeline-main,
+#workload-main {
+    width: 1fr;
+    height: 1fr;
+}
+
+#kanban-row {
+    width: 1fr;
+    height: 100%;
+    margin: 0 1;
+}
+
+.kanban-col {
+    width: 1fr;
+    margin: 0 1;
+    padding: 1;
+}
+
+.col-header {
+    text-align: left;
+    text-style: bold;
+    color: #666666;
+    margin-bottom: 1;
+    border-bottom: ascii #333333;
+}
+
+.issue-card {
+    margin-bottom: 0;
+    height: 4;
+    border-bottom: ascii #1a1a1a;
+}
+
+.issue-card.is-selected {
+    background: #111111;
+}
+
+.timeline-row,
+.workload-row {
+    height: 2;
+    padding: 0 2;
+    border-bottom: ascii #1a1a1a;
+}
+
+.timeline-row.is-selected,
+.workload-row.is-selected {
+    background: #111111;
+}
+
+.detail-sidebar {
+    width: 36;
+    padding: 1 2;
+    border-left: ascii #222222;
+    height: 1fr;
+}
+
+.detail-sidebar-title {
+    text-style: bold;
+    color: #ffffff;
+    height: 2;
+}
+
+.detail-sidebar-hint {
+    color: #555555;
+    margin-top: 1;
+}
+
+#sprint-layout {
+    height: 100%;
+}
+
+#timeline-content,
+#workload-list {
+    padding: 0 1;
+}
+
+.placeholder-text {
+    padding: 2;
+    color: #444444;
+}
+
+#dash-chart,
+#workload-chart {
+    min-height: 10;
+    padding: 1 2;
+}
+
+#sprint-summary {
+    height: 9;
+    margin: 0 2 1 2;
+    padding: 1 1 0 1;
+    border-bottom: ascii #222222;
+    color: #666666;
+}
+
+Tabs {
+    background: #000000;
+    color: #666666;
+    border-bottom: ascii #333333;
+    height: 3;
+}
+
+Tabs > Tab {
+    padding: 0 2;
+}
+
+Tabs > Tab.-active {
+    color: #ffffff;
+    text-style: bold;
+    background: #111111;
+}
+
+#app-status {
+    dock: top;
+    height: 1;
+    padding: 0 2;
+    color: #c8c8c8;
+    background: #090909;
+    border-bottom: ascii #222222;
+}
+
+#context-bar {
+    dock: top;
+    height: 1;
+    padding: 0 2;
+    color: #b5b5b5;
+    background: #060606;
+    border-bottom: ascii #1b1b1b;
+}
+
+#sync-history {
+    dock: top;
+    min-height: 1;
+    padding: 0 2;
+    color: #555555;
+    border-bottom: ascii #222222;
+}
+
+#help-overlay {
+    dock: top;
+    max-height: 7;
+    padding: 1 2;
+    border-bottom: ascii #333333;
+    color: #cccccc;
+    background: #050505;
+    display: none;
+}
+
+#command-prompt {
+    dock: bottom;
+    height: 1;
+    padding: 0 2;
+    color: #bbbbbb;
+    border-top: ascii #222222;
+}
+
+#command-palette {
+    dock: bottom;
+    max-height: 10;
+    padding: 0 2;
+    color: #9a9a9a;
+    border-top: ascii #222222;
+}
+
+#sprint-detail {
+    height: 1fr;
+    padding: 1 0;
+    color: #bbbbbb;
+}
+
+#sprint-hint {
+    height: auto;
+}
+
+Footer {
+    background: #000000;
+    color: #444444;
+}
+
+#sync-history-modal-header {
+    dock: top;
+    height: 3;
+    padding: 1 2;
+    border-bottom: ascii #333333;
+    text-style: bold;
+    color: #ffffff;
+}
+
+#sync-history-modal-content {
+    height: 1fr;
+    padding: 1 2;
+    color: #cccccc;
+}

@@ -169,8 +169,13 @@ class SprintBoardView(Static):
         if self.filter_active:
             return
         if self._select_issue_by_id(message.issue_id):
-            self.detail_open = True
-            self.refresh_view()
+            issue = self.current_issue()
+            if issue:
+                from projectdash.views.issue_detail import IssueDetailScreen
+                self.app.push_screen(IssueDetailScreen(issue))
+            else:
+                self.detail_open = True
+                self.refresh_view()
 
     async def cycle_selected_status(self) -> tuple[bool, str]:
         issue = self.current_issue()

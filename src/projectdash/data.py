@@ -54,19 +54,32 @@ class DataManager:
         ]
         
         mock_issues = [
-            Issue("PROJ-245", "Fix Login Bug", "High", "In Progress", mock_users[1], 5, "1", "2024-02-24"),
-            Issue("PROJ-234", "UI Fix", "Medium", "In Progress", mock_users[1], 3, "1", "2024-02-25"),
-            Issue("PROJ-251", "CSS Bug", "Low", "Todo", mock_users[1], 2, "1", "2024-02-26"),
-            Issue("PROJ-234-B", "Backend Sync", "High", "In Progress", mock_users[0], 5, "1", "2024-02-27"),
-            Issue("PROJ-246", "Schema Update", "Medium", "Todo", mock_users[0], 2, "2", "2024-03-05"),
-            Issue("PROJ-251-B", "API Refactor", "Medium", "In Progress", mock_users[2], 3, "2", "2024-03-07"),
-            Issue("PROJ-243", "Write Tests", "Low", "Review", mock_users[2], 2, "2", "2024-03-09"),
-            Issue("PROJ-246-B", "DB Setup", "Low", "Done", mock_users[3], 3, "2", "2024-03-12"),
-            Issue("PROJ-250", "Migration", "Medium", "Todo", mock_users[3], 2, "3", "2024-03-16"),
-            Issue("PROJ-244", "Doc Update", "Low", "Review", mock_users[3], 2, "3", "2024-03-18"),
-            Issue("PROJ-245-B", "Core Refactor", "High", "In Progress", mock_users[4], 5, "3", "2024-03-19"),
-            Issue("PROJ-235", "Plugin System", "Medium", "Todo", mock_users[4], 3, "3", "2024-03-21"),
-            Issue("PROJ-233", "Fast Sync", "High", "Todo", mock_users[4], 2, "3", "2024-03-23"),
+            Issue("PROJ-245", "Fix Login Bug", "High", "In Progress", mock_users[1], 5, "1", "2024-02-24",
+                  description="Users are unable to log in when 2FA is enabled. The session token expires prematurely after the first factor check. Reproduce by: 1) Enable 2FA on test account 2) Attempt login 3) Observe 401 after SMS verification."),
+            Issue("PROJ-234", "UI Fix", "Medium", "In Progress", mock_users[1], 3, "1", "2024-02-25",
+                  description="Navigation bar overlaps content on viewport widths below 1024px. Fix CSS breakpoints for the top nav and ensure proper z-index stacking."),
+            Issue("PROJ-251", "CSS Bug", "Low", "Todo", mock_users[1], 2, "1", "2024-02-26",
+                  description="Button hover states on the settings page are missing. Update .btn-secondary:hover in the component stylesheet."),
+            Issue("PROJ-234-B", "Backend Sync", "High", "In Progress", mock_users[0], 5, "1", "2024-02-27",
+                  description="The background sync job is failing silently when the Linear API rate limit is hit. Add proper retry logic with exponential backoff and surface errors to the status endpoint."),
+            Issue("PROJ-246", "Schema Update", "Medium", "Todo", mock_users[0], 2, "2", "2024-03-05",
+                  description="Add `last_synced_at` column to the issues table. Write a migration and update the ORM model accordingly."),
+            Issue("PROJ-251-B", "API Refactor", "Medium", "In Progress", mock_users[2], 3, "2", "2024-03-07",
+                  description="The /api/v1/issues endpoint mixes concerns. Split into separate handlers for reads and writes, add request validation middleware, and update the OpenAPI spec."),
+            Issue("PROJ-243", "Write Tests", "Low", "Review", mock_users[2], 2, "2", "2024-03-09",
+                  description="Unit tests are missing for the DataManager.cycle_issue_status path. Add tests covering the happy path, missing state mapping, and rollback on remote failure."),
+            Issue("PROJ-246-B", "DB Setup", "Low", "Done", mock_users[3], 3, "2", "2024-03-12",
+                  description="Initial database schema created with users, projects, issues, and workflow_states tables. Migrations applied and verified against staging environment."),
+            Issue("PROJ-250", "Migration", "Medium", "Todo", mock_users[3], 2, "3", "2024-03-16",
+                  description="Migrate legacy project data from the old JSON flat-files into the new SQLite schema. Validate record counts match before and after migration."),
+            Issue("PROJ-244", "Doc Update", "Low", "Review", mock_users[3], 2, "3", "2024-03-18",
+                  description="Update README.md and the CLI help text to reflect the new `/sync` and `/doctor` commands added in Phase 3."),
+            Issue("PROJ-245-B", "Core Refactor", "High", "In Progress", mock_users[4], 5, "3", "2024-03-19",
+                  description="The DataManager class has grown too large. Extract Linear API interaction into a dedicated service layer, move caching logic into a CacheManager, and keep DataManager as a thin coordinator."),
+            Issue("PROJ-235", "Plugin System", "Medium", "Todo", mock_users[4], 3, "3", "2024-03-21",
+                  description="Design and implement a plugin architecture that allows custom views and data sources to be registered at startup. Start with a simple hook-based system documented in PLUGINS.md."),
+            Issue("PROJ-233", "Fast Sync", "High", "Todo", mock_users[4], 2, "3", "2024-03-23",
+                  description="Reduce sync time by fetching only issues modified since `last_synced_at`. Use the Linear `updatedAt` filter parameter and track the watermark in the database."),
         ]
         
         await self.db.save_users(mock_users)
@@ -163,6 +176,7 @@ class DataManager:
                     points=i["estimate"] or 0,
                     project_id=i["project"]["id"] if i.get("project") else None,
                     due_date=i.get("dueDate"),
+                    description=i.get("description"),
                 ))
 
             issues_by_project: Dict[str, List[Issue]] = {}
@@ -507,6 +521,7 @@ class DataManager:
             points=raw_issue.get("estimate") or 0,
             project_id=raw_issue["project"]["id"] if raw_issue.get("project") else None,
             due_date=raw_issue.get("dueDate"),
+            description=raw_issue.get("description"),
         )
 
         replaced = False

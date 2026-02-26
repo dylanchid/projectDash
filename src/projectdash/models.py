@@ -44,4 +44,5 @@ class Issue:
     linear_id: Optional[str] = None
     team_id: Optional[str] = None
     state_id: Optional[str] = None
+    description: Optional[str] = None
     created_at: datetime = field(default_factory=datetime.now)

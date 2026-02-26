@@ -44,6 +44,7 @@ class Database:
                     points INTEGER DEFAULT 0,
                     due_date TEXT,
                     project_id TEXT,
+                    description TEXT,
                     FOREIGN KEY (assignee_id) REFERENCES users (id),
                     FOREIGN KEY (project_id) REFERENCES projects (id)
                 )
@@ -82,6 +83,10 @@ class Database:
                 await db.execute("ALTER TABLE issues ADD COLUMN team_id TEXT")
             except aiosqlite.OperationalError:
                 pass
+            try:
+                await db.execute("ALTER TABLE issues ADD COLUMN description TEXT")
+            except aiosqlite.OperationalError:
+                pass
             await db.commit()
 
     async def save_users(self, users: List[User]):
@@ -103,7 +108,7 @@ class Database:
     async def save_issues(self, issues: List[Issue], project_id: Optional[str] = None):
         async with aiosqlite.connect(self.db_path) as db:
             await db.executemany(
-                "INSERT OR REPLACE INTO issues (id, linear_id, title, priority, status, state_id, team_id, assignee_id, points, due_date, project_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT OR REPLACE INTO issues (id, linear_id, title, priority, status, state_id, team_id, assignee_id, points, due_date, project_id, description) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [
                     (
                         i.id,
@@ -117,6 +122,7 @@ class Database:
                         i.points,
                         i.due_date,
                         i.project_id or project_id,
+                        i.description,
                     )
                     for i in issues
                 ]
@@ -175,6 +181,7 @@ class Database:
                         linear_id=row["linear_id"],
                         team_id=row["team_id"],
                         state_id=row["state_id"],
+                        description=row["description"],
                     ))
                 return issues
 

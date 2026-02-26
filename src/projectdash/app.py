@@ -7,6 +7,7 @@ from projectdash.views.sprint_board import SprintBoardView
 from projectdash.views.workload import WorkloadView
 from projectdash.views.timeline import TimelineView
 from projectdash.views.sync_history import SyncHistoryScreen
+from projectdash.views.issue_detail import IssueDetailScreen
 from projectdash.data import DataManager
 from projectdash.config import AppConfig
 from projectdash.services import MetricsService
@@ -156,6 +157,11 @@ class ProjectDash(App):
             ok, message = sprint.commit_filter()
             self._publish_action_result(ok, message)
             return
+        if sprint:
+            issue = sprint.current_issue()
+            if issue:
+                self.push_screen(IssueDetailScreen(issue))
+                return
         view = self._active_detail_view()
         if view is None:
             return
@@ -374,7 +380,9 @@ class ProjectDash(App):
     def action_sprint_open_detail(self) -> None:
         sprint = self._active_sprint_view()
         if sprint and not sprint.filter_active:
-            sprint.open_selected_issue_detail()
+            issue = sprint.current_issue()
+            if issue:
+                self.push_screen(IssueDetailScreen(issue))
 
     def action_sprint_close_detail(self) -> None:
         sprint = self._active_sprint_view()

@@ -107,6 +107,7 @@ class LinearClient:
               id
               identifier
               title
+              description
               priority
               state {
                 id
@@ -192,6 +193,7 @@ class LinearClient:
             id
             identifier
             title
+            description
             priority
             state {
               id

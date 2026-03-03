@@ -67,6 +67,115 @@ Screen {
     height: 1fr;
 }
 
+#ideation-layout {
+    height: 1fr;
+    width: 100%;
+}
+
+#ideation-main {
+    width: 1fr;
+    height: 1fr;
+}
+
+#ideation-toolbar {
+    height: 2;
+    padding: 0 2;
+    color: #7b7b7b;
+}
+
+#ideation-hero {
+    height: 18;
+    margin: 0 2 1 2;
+    border: ascii #1f1f1f;
+    background: #050505;
+}
+
+#ideation-hero-chart {
+    width: 1fr;
+    padding: 1 2;
+}
+
+#ideation-hero-title {
+    text-style: bold;
+    color: #ffffff;
+    height: 1;
+}
+
+#ideation-hero-body {
+    height: 1fr;
+}
+
+.ideation-hero-plot {
+    height: 1fr;
+}
+
+.ideation-hero-fallback {
+    color: #cfcfcf;
+}
+
+#ideation-hero-kpis {
+    width: 28;
+    padding: 1 2;
+    border-left: ascii #1f1f1f;
+}
+
+#ideation-hero-kpis-title {
+    text-style: bold;
+    color: #bfbfbf;
+    height: 1;
+}
+
+#ideation-hero-kpis-body {
+    color: #9b9b9b;
+}
+
+#ideation-grid {
+    height: 1fr;
+    margin: 0 1;
+}
+
+.ideation-column {
+    width: 1fr;
+}
+
+.ideation-card {
+    margin: 0 1 1 1;
+    padding: 1;
+    border: ascii #222222;
+    background: #060606;
+}
+
+.ideation-card.is-selected {
+    border: ascii #444444;
+    background: #0a0a0a;
+}
+
+.ideation-card-title {
+    height: 1;
+}
+
+.ideation-card-value {
+    color: #aaaaaa;
+    height: 2;
+}
+
+.ideation-plot {
+    min-height: 10;
+}
+
+.ideation-card-fallback {
+    color: #bfbfbf;
+}
+
+.ideation-card-kpis {
+    color: #8a8a8a;
+    height: 1;
+}
+
+.ideation-card-cue {
+    color: #6f6f6f;
+}
+
 #kanban-row {
     width: 1fr;
     height: 100%;

@@ -15,6 +15,18 @@
   "workload_issue_preview_limit": 3,
   "timeline_horizon_days": 30,
   "timeline_max_projects": 6,
+  "sprint_risk_blocked_threshold": 1,
+  "sprint_risk_failing_pr_threshold": 1,
+  "sprint_risk_stale_review_days": 3,
+  "sprint_risk_stale_review_threshold": 1,
+  "sprint_risk_overloaded_owners_threshold": 1,
+  "sprint_risk_overloaded_utilization_pct": 80,
+  "github_repositories": [
+    "acme/platform",
+    "acme/web"
+  ],
+  "github_pr_limit": 30,
+  "github_sync_checks": true,
   "seed_mock_data": false,
   "user_capacity_overrides": {
     "Alice": 12,

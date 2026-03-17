@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 
 from projectdash.config import AppConfig
 from projectdash.data import DataManager
-from projectdash.models import Issue, Project, User
+from projectdash.enums import CiConclusion, PullRequestState, WorkloadStatus
+from projectdash.models import CiCheck, Issue, Project, PullRequest, User
 
 
 @dataclass(frozen=True)
@@ -19,6 +20,14 @@ class ProjectCardMetric:
 
 
 @dataclass(frozen=True)
+class StaleWorkMetric:
+    issue_id: str
+    title: str
+    owner_name: str
+    days_stale: int
+
+
+@dataclass(frozen=True)
 class DashboardMetricSet:
     projects_total: int
     issues_total: int
@@ -27,6 +36,7 @@ class DashboardMetricSet:
     connected: bool
     loaded_users: int
     project_cards: list[ProjectCardMetric]
+    stale_work: list[StaleWorkMetric] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -38,6 +48,19 @@ class SprintColumnMetric:
 @dataclass(frozen=True)
 class SprintBoardMetricSet:
     columns: list[SprintColumnMetric]
+    risk: "SprintRiskMetric"
+
+
+@dataclass(frozen=True)
+class SprintRiskMetric:
+    blocked_issues: int
+    failing_prs: int
+    stale_reviews: int
+    overloaded_owners: int
+    blocked_breached: bool
+    failing_prs_breached: bool
+    stale_reviews_breached: bool
+    overloaded_owners_breached: bool
 
 
 @dataclass(frozen=True)
@@ -79,6 +102,7 @@ class TimelineProjectMetric:
     done_points: int
     total_points: int
     status_color: str
+    blocked_count: int
 
 
 @dataclass(frozen=True)
@@ -129,6 +153,8 @@ class MetricsService:
             for project in projects
         ]
 
+        stale_work = self._stale_work(issues)
+
         return DashboardMetricSet(
             projects_total=len(projects),
             issues_total=len(issues),
@@ -137,7 +163,43 @@ class MetricsService:
             connected=connected,
             loaded_users=len(data.users),
             project_cards=project_cards,
+            stale_work=stale_work,
         )
+
+    def _stale_work(self, issues: list[Issue]) -> list[StaleWorkMetric]:
+        active_statuses = {s.lower() for s in self.config.active_statuses}
+        stale_days = self.config.dashboard_stale_days
+        cutoff = datetime.now(timezone.utc) - timedelta(days=stale_days)
+        
+        stale = []
+        for issue in issues:
+            if issue.status.lower() not in active_statuses:
+                continue
+            if not issue.assignee:
+                continue
+                
+            # Use updated_at or created_at if missing
+            updated_at = getattr(issue, "updated_at", None) or issue.created_at
+            if isinstance(updated_at, datetime):
+                # Ensure it's offset-aware for comparison
+                if updated_at.tzinfo is None:
+                    updated_at = updated_at.replace(tzinfo=timezone.utc)
+                else:
+                    updated_at = updated_at.astimezone(timezone.utc)
+                    
+                if updated_at <= cutoff:
+                    days = (datetime.now(timezone.utc) - updated_at).days
+                    stale.append(
+                        StaleWorkMetric(
+                            issue_id=issue.id,
+                            title=issue.title,
+                            owner_name=issue.assignee.name,
+                            days_stale=days,
+                        )
+                    )
+        
+        stale.sort(key=lambda x: x.days_stale, reverse=True)
+        return stale
 
     def sprint_board(self, data: DataManager, project_id: str | None = None) -> SprintBoardMetricSet:
         configured = set(self.config.kanban_statuses)
@@ -162,7 +224,48 @@ class MetricsService:
                     issues=overflow_issues,
                 )
             )
-        return SprintBoardMetricSet(columns=columns)
+        return SprintBoardMetricSet(columns=columns, risk=self._sprint_risk(data, all_issues))
+
+    def blocked_board(self, data: DataManager, project_id: str | None = None) -> SprintBoardMetricSet:
+        all_issues = data.get_issues()
+        if project_id:
+            all_issues = [issue for issue in all_issues if issue.project_id == project_id]
+        
+        blocked_issues = []
+        for issue in all_issues:
+            is_blocked = "blocked" in issue.status.lower()
+            if is_blocked:
+                blocked_issues.append(issue)
+                continue
+            
+            pull_requests = data.get_pull_requests(issue.id)
+            has_failing_pr = False
+            for pr in pull_requests:
+                if not self._pull_request_is_open(pr):
+                    continue
+                checks = data.get_ci_checks(pr.id)
+                if any(self._check_is_failing(check) for check in checks):
+                    has_failing_pr = True
+                    break
+            
+            if has_failing_pr:
+                blocked_issues.append(issue)
+
+        # Sort by creation date (oldest first to highlight stale work)
+        blocked_issues.sort(key=lambda x: x.created_at or datetime.min.replace(tzinfo=timezone.utc))
+
+        columns = []
+        for status in self.config.kanban_statuses:
+            issues = [issue for issue in blocked_issues if issue.status == status]
+            if issues:
+                columns.append(SprintColumnMetric(status=status, issues=issues))
+        
+        configured = set(self.config.kanban_statuses)
+        overflow_issues = [issue for issue in blocked_issues if issue.status not in configured]
+        if overflow_issues:
+            columns.append(SprintColumnMetric(status="Overflow", issues=overflow_issues))
+
+        return SprintBoardMetricSet(columns=columns, risk=self._sprint_risk(data, all_issues))
 
     def workload(self, data: DataManager, project_id: str | None = None) -> WorkloadMetricSet:
         users = data.users
@@ -226,6 +329,7 @@ class MetricsService:
             due_date = self._parse_date(project.due_date)
             due_label = due_date.isoformat() if due_date else "N/A"
             remaining = self._days_remaining_label(due_date)
+            blocked_count = self._count_blocked_issues(project_issues)
             lines.append(
                 TimelineProjectMetric(
                     project_id=project.id,
@@ -236,6 +340,7 @@ class MetricsService:
                     done_points=done_points,
                     total_points=total_points,
                     status_color=self._timeline_color(due_date),
+                    blocked_count=blocked_count,
                 )
             )
 
@@ -274,6 +379,66 @@ class MetricsService:
     def _count_blocked_issues(self, issues: list[Issue]) -> int:
         return sum(1 for issue in issues if "blocked" in issue.status.lower())
 
+    def _sprint_risk(self, data: DataManager, issues: list[Issue]) -> SprintRiskMetric:
+        blocked_issues = self._count_blocked_issues(issues)
+        issue_ids = {issue.id for issue in issues}
+        linked_pull_requests: list[PullRequest] = []
+        if hasattr(data, "get_pull_requests"):
+            linked_pull_requests = [
+                pull_request
+                for pull_request in data.get_pull_requests()
+                if pull_request.issue_id and pull_request.issue_id in issue_ids
+            ]
+
+        failing_prs = 0
+        stale_reviews = 0
+        stale_cutoff = datetime.now(timezone.utc) - timedelta(days=self.config.sprint_risk_stale_review_days)
+        for pull_request in linked_pull_requests:
+            if not self._pull_request_is_open(pull_request):
+                continue
+            checks = data.get_ci_checks(pull_request.id) if hasattr(data, "get_ci_checks") else []
+            if any(self._check_is_failing(check) for check in checks):
+                failing_prs += 1
+            stamp = self._parse_timestamp(pull_request.updated_at) or self._parse_timestamp(pull_request.opened_at)
+            if stamp is not None and stamp <= stale_cutoff:
+                stale_reviews += 1
+
+        overloaded_owners = self._count_overloaded_owners(issues)
+
+        return SprintRiskMetric(
+            blocked_issues=blocked_issues,
+            failing_prs=failing_prs,
+            stale_reviews=stale_reviews,
+            overloaded_owners=overloaded_owners,
+            blocked_breached=blocked_issues >= self.config.sprint_risk_blocked_threshold,
+            failing_prs_breached=failing_prs >= self.config.sprint_risk_failing_pr_threshold,
+            stale_reviews_breached=stale_reviews >= self.config.sprint_risk_stale_review_threshold,
+            overloaded_owners_breached=(
+                overloaded_owners >= self.config.sprint_risk_overloaded_owners_threshold
+            ),
+        )
+
+    def _count_overloaded_owners(self, issues: list[Issue]) -> int:
+        points_by_owner: dict[str, int] = {}
+        users_by_owner: dict[str, User] = {}
+        for issue in issues:
+            if issue.assignee is None:
+                continue
+            owner_key = issue.assignee.id or issue.assignee.name
+            points_by_owner[owner_key] = points_by_owner.get(owner_key, 0) + max(0, issue.points)
+            users_by_owner[owner_key] = issue.assignee
+
+        overloaded = 0
+        for owner_key, points in points_by_owner.items():
+            user = users_by_owner[owner_key]
+            capacity = self._user_capacity(user)
+            if capacity <= 0:
+                continue
+            utilization = int((points / capacity) * 100)
+            if utilization >= self.config.sprint_risk_overloaded_utilization_pct:
+                overloaded += 1
+        return overloaded
+
     def _velocity_points(self, issues: list[Issue]) -> int:
         done = {status.lower() for status in self.config.done_statuses}
         return sum(issue.points for issue in issues if issue.status.lower() in done)
@@ -283,10 +448,10 @@ class MetricsService:
 
     def _utilization_status(self, utilization: int) -> tuple[str, str]:
         if utilization >= self.config.workload_critical_pct:
-            return "Overallocated", "#ff0000"
+            return WorkloadStatus.OVERALLOCATED, "#ff0000"
         if utilization >= self.config.workload_warning_pct:
-            return "At Capacity", "#ffff00"
-        return "Available", "#00ff00"
+            return WorkloadStatus.AT_CAPACITY, "#ffff00"
+        return WorkloadStatus.AVAILABLE, "#00ff00"
 
     def _utilization_bar(self, utilization: int) -> str:
         width = self.config.workload_bar_width
@@ -349,6 +514,35 @@ class MetricsService:
             return datetime.strptime(value, "%Y-%m-%d").date()
         except ValueError:
             return None
+
+    def _parse_timestamp(self, value: str | None) -> datetime | None:
+        if not value:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            return None
+        if normalized.endswith("Z"):
+            normalized = f"{normalized[:-1]}+00:00"
+        try:
+            parsed = datetime.fromisoformat(normalized)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    @staticmethod
+    def _pull_request_is_open(pull_request: PullRequest) -> bool:
+        state = (pull_request.state or "").casefold()
+        return state not in {PullRequestState.CLOSED, PullRequestState.MERGED}
+
+    @staticmethod
+    def _check_is_failing(check: CiCheck) -> bool:
+        status = (check.status or "").casefold()
+        if status != "completed":
+            return False
+        conclusion = (check.conclusion or "").casefold()
+        return conclusion not in {CiConclusion.SUCCESS, CiConclusion.NEUTRAL, CiConclusion.SKIPPED, ""}
 
     def _days_remaining_label(self, due_date: date | None) -> str:
         if due_date is None:

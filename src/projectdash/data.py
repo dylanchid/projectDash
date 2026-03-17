@@ -1,30 +1,74 @@
 from __future__ import annotations
 
-from typing import Any, Awaitable, Callable, Dict, List
-from projectdash.models import Project, Issue, User, LinearWorkflowState
+from typing import Any, List
+from projectdash.models import AgentRun, CiCheck, PullRequest, Repository, Project, Issue, User, LinearWorkflowState
 from projectdash.database import Database
-from projectdash.linear import LinearApiError, LinearClient
+from projectdash.connectors import GitHubConnector, LinearConnector
+from projectdash.github import GitHubApiError, GitHubClient
+from projectdash.linear import LinearClient
 from projectdash.config import AppConfig
+from projectdash.services.github_query_service import GitHubQueryService
+from projectdash.services.github_mutation_service import GitHubMutationService
+from projectdash.services.issue_mutation_service import IssueMutationService
+from projectdash.services.issue_service import IssueService
+from projectdash.services.sync_service import SyncService
 import os
-from datetime import datetime
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from projectdash.enums import AgentRunStatus, ConnectorFreshness, SyncResult
 
 class DataManager:
     def __init__(self, config: AppConfig | None = None):
         self.config = config or AppConfig.from_env()
         self.db = Database()
         self.linear = LinearClient()
+        self.github = GitHubClient()
+        self.linear_connector = LinearConnector()
+        self.github_connector = GitHubConnector()
+        self.connectors = {
+            self.github_connector.name: self.github_connector,
+            self.linear_connector.name: self.linear_connector,
+        }
         self.users: List[User] = []
         self.projects: List[Project] = []
         self.issues: List[Issue] = []
+        self.repositories: List[Repository] = []
+        self.pull_requests: List[PullRequest] = []
+        self.ci_checks: List[CiCheck] = []
         self.workflow_states_by_team: dict[str, list[LinearWorkflowState]] = {}
         self.is_initialized = False
         self.sync_in_progress = False
         self.last_sync_at: str | None = None
         self.last_sync_error: str | None = None
-        self.last_sync_result: str = "idle"
+        self.last_sync_result: str = SyncResult.IDLE
         self.sync_diagnostics: dict[str, str] = {}
         self.last_sync_counts: dict[str, int] = {}
         self.sync_history: list[dict[str, Any]] = []
+        self.sync_stale_minutes = SyncService.sync_stale_threshold_minutes()
+        self._connector_freshness: dict[str, dict[str, str | None]] = {
+            "linear": {
+                "status": ConnectorFreshness.IDLE,
+                "last_success_at": None,
+                "last_attempt_at": None,
+                "last_error": None,
+            },
+            "github": {
+                "status": ConnectorFreshness.IDLE,
+                "last_success_at": None,
+                "last_attempt_at": None,
+                "last_error": None,
+            },
+        }
+        self.sync_service = SyncService(self)
+        self.issue_service = IssueService(self)
+        self.issue_mutation_service = IssueMutationService(self)
+        self.github_query_service = GitHubQueryService(self)
+        self.github_mutation_service = GitHubMutationService(self)
 
     async def initialize(self):
         """Initializes the database and loads initial data from cache."""
@@ -48,9 +92,42 @@ class DataManager:
         ]
         
         mock_projects = [
-            Project("1", "Acme Corp", "Synced", 12, 5, 2, "2024-02-28", "Jan Q1"),
-            Project("2", "DevTools", "Synced", 8, 3, 0, "2024-03-15", "Feb Q1"),
-            Project("3", "Web Redesign", "Synced", 7, 2, 1, "2024-03-30", "Design"),
+            Project(
+                "1",
+                "Acme Corp",
+                "Synced",
+                12,
+                5,
+                2,
+                "2024-02-28",
+                "Jan Q1",
+                "2024-01-15",
+                "Customer onboarding delivery for enterprise accounts.",
+            ),
+            Project(
+                "2",
+                "DevTools",
+                "Synced",
+                8,
+                3,
+                0,
+                "2024-03-15",
+                "Feb Q1",
+                "2024-01-28",
+                "Internal developer productivity upgrades and platform hardening.",
+            ),
+            Project(
+                "3",
+                "Web Redesign",
+                "Synced",
+                7,
+                2,
+                1,
+                "2024-03-30",
+                "Design",
+                "2024-02-04",
+                "Cross-functional redesign for marketing and account surfaces.",
+            ),
         ]
         
         mock_issues = [
@@ -78,6 +155,9 @@ class DataManager:
         self.users = await self.db.get_users()
         self.projects = await self.db.get_projects()
         self.issues = await self.db.get_issues()
+        self.repositories = await self.db.get_repositories()
+        self.pull_requests = await self.db.get_pull_requests(limit=5000)
+        self.ci_checks = await self.db.get_ci_checks(limit=10000)
         workflow_states = await self.db.get_workflow_states()
         workflow_states_by_team: dict[str, list[LinearWorkflowState]] = {}
         for state in workflow_states:
@@ -87,471 +167,474 @@ class DataManager:
 
     async def sync_with_linear(self):
         """Fetches latest data from Linear and updates the cache."""
-        self.sync_in_progress = True
-        self.last_sync_error = None
-        self.last_sync_result = "syncing"
-        self.sync_diagnostics = {}
-        self.last_sync_counts = {}
-        try:
-            api_key = os.getenv("LINEAR_API_KEY")
-            if not api_key:
-                self.last_sync_error = "LINEAR_API_KEY not set"
-                self.last_sync_result = "failed"
-                self.sync_diagnostics["auth"] = "failed: LINEAR_API_KEY not set"
-                return
+        await self.sync_service.sync_with_linear()
 
-            print("   - Testing connection...")
-            try:
-                me = await self.linear.get_me()
-                print(f"   - Authenticated as: {me['viewer']['name']}")
-                self.sync_diagnostics["auth"] = f"ok: {me['viewer']['name']}"
-            except Exception as e:
-                print(f"   - Connection failed: {e}")
-                self.last_sync_error = f"auth failed: {e}"
-                self.last_sync_result = "failed"
-                self.sync_diagnostics["auth"] = f"failed: {e}"
-                return
-
-            print("   - Fetching projects...")
-            try:
-                raw_projects = await self.linear.get_projects()
-            except Exception as e:
-                self.last_sync_error = f"projects fetch failed: {e}"
-                self.last_sync_result = "failed"
-                self.sync_diagnostics["projects"] = f"failed: {e}"
-                return
-            self.sync_diagnostics["projects"] = f"ok: {len(raw_projects)}"
-            print("   - Fetching workflow states...")
-            try:
-                raw_teams = await self.linear.get_team_workflow_states()
-            except Exception as e:
-                self.last_sync_error = f"workflow states fetch failed: {e}"
-                self.last_sync_result = "failed"
-                self.sync_diagnostics["workflow_states"] = f"failed: {e}"
-                return
-            self.sync_diagnostics["workflow_states"] = f"ok: {len(raw_teams)} teams"
-            print("   - Fetching issues...")
-            try:
-                raw_issues = await self.linear.get_issues()
-            except Exception as e:
-                self.last_sync_error = f"issues fetch failed: {e}"
-                self.last_sync_result = "failed"
-                self.sync_diagnostics["issues"] = f"failed: {e}"
-                return
-            self.sync_diagnostics["issues"] = f"ok: {len(raw_issues)}"
-            self._cache_workflow_states(raw_teams)
-
-            users_dict = {}
-            issues = []
-            for i in raw_issues:
-                assignee = None
-                if i["assignee"]:
-                    u_id = i["assignee"]["id"]
-                    if u_id not in users_dict:
-                        users_dict[u_id] = User(u_id, i["assignee"]["name"], i["assignee"]["avatarUrl"])
-                    assignee = users_dict[u_id]
-
-                issues.append(Issue(
-                    id=i["identifier"],
-                    linear_id=i["id"],
-                    title=i["title"],
-                    priority=str(i["priority"]),
-                    status=i["state"]["name"] if i["state"] else "Todo",
-                    state_id=i["state"]["id"] if i["state"] else None,
-                    team_id=i["team"]["id"] if i.get("team") else None,
-                    assignee=assignee,
-                    points=i["estimate"] or 0,
-                    project_id=i["project"]["id"] if i.get("project") else None,
-                    due_date=i.get("dueDate"),
-                ))
-
-            issues_by_project: Dict[str, List[Issue]] = {}
-            for issue in issues:
-                if issue.project_id:
-                    issues_by_project.setdefault(issue.project_id, []).append(issue)
-
-            projects = []
-            for p in raw_projects:
-                project_issues = issues_by_project.get(p["id"], [])
-                status_name = p.get("state") or "Active"
-                projects.append(Project(
-                    id=p["id"],
-                    name=p["name"],
-                    status=status_name,
-                    issues_count=len(project_issues),
-                    in_progress_count=sum(1 for issue in project_issues if issue.status in {"In Progress", "Review"}),
-                    blocked_count=sum(1 for issue in project_issues if "blocked" in issue.status.lower()),
-                    due_date=p.get("targetDate") or "N/A",
-                    cycle="Current",
-                ))
-
-            try:
-                await self.db.save_users(list(users_dict.values()))
-                await self.db.save_projects(projects)
-                await self.db.save_issues(issues)
-                await self.db.save_workflow_states(self._flatten_workflow_states())
-            except Exception as e:
-                self.last_sync_error = f"persist failed: {e}"
-                self.last_sync_result = "failed"
-                self.sync_diagnostics["persist"] = f"failed: {e}"
-                return
-            self.sync_diagnostics["persist"] = "ok"
-            try:
-                await self.load_from_cache()
-            except Exception as e:
-                self.last_sync_error = f"reload failed: {e}"
-                self.last_sync_result = "failed"
-                self.sync_diagnostics["reload"] = f"failed: {e}"
-                return
-            self.sync_diagnostics["reload"] = "ok"
-            self.last_sync_counts = {
-                "users": len(self.users),
-                "projects": len(self.projects),
-                "issues": len(self.issues),
-                "teams": len(self.workflow_states_by_team),
-            }
-            self.last_sync_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            self.last_sync_result = "success"
-        except Exception as e:
-            self.last_sync_error = str(e)
-            self.last_sync_result = "failed"
-            self.sync_diagnostics["unexpected"] = f"failed: {e}"
-            raise
-        finally:
-            await self._record_sync_history()
-            self.sync_in_progress = False
+    async def sync_with_github(self):
+        """Fetches latest GitHub repository/PR/check data and updates the cache."""
+        await self.sync_service.sync_with_github()
 
     def sync_status_summary(self) -> str:
-        if self.sync_in_progress:
-            return "syncing"
-        return self._sync_status_summary_core()
+        return self.sync_service.sync_status_summary()
 
     def sync_diagnostic_lines(self) -> list[str]:
-        return [f"{step}: {status}" for step, status in self.sync_diagnostics.items()]
+        return self.sync_service.sync_diagnostic_lines()
 
     def get_sync_history(self, limit: int = 20) -> list[dict[str, Any]]:
-        return self.sync_history[:limit]
+        return self.sync_service.get_sync_history(limit=limit)
+
+    def available_connectors(self) -> list[str]:
+        return self.sync_service.available_connectors()
+
+    async def save_sync_cursor(self, provider: str, cursor: str | None) -> None:
+        await self.sync_service.save_sync_cursor(provider, cursor)
+
+    async def get_sync_cursor(self, provider: str) -> str | None:
+        return await self.sync_service.get_sync_cursor(provider)
+
+    async def record_agent_run(self, run: AgentRun) -> None:
+        await self.db.save_agent_run(run)
+
+    async def record_action(
+        self,
+        action_type: str,
+        target_id: str,
+        status: str,
+        message: str | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        from uuid import uuid4
+        from projectdash.models import ActionRecord
+        action = ActionRecord(
+            id=f"act-{uuid4().hex[:12]}",
+            action_type=action_type,
+            target_id=target_id,
+            status=status,
+            message=message,
+            payload=payload or {},
+        )
+        await self.db.save_actions([action])
+
+    async def get_action_history(self, limit: int = 50) -> list[ActionRecord]:
+        return await self.db.get_action_history(limit)
+
+    async def get_agent_runs(self, limit: int = 50) -> list[AgentRun]:
+        return await self.db.get_agent_runs(limit=limit)
+
+    async def complete_agent_run(
+        self,
+        run_id: str,
+        exit_code: int,
+        *,
+        session_ref: str | None = None,
+        log_path: str | None = None,
+    ) -> tuple[bool, str]:
+        run = await self.db.get_agent_run(run_id)
+        if run is None:
+            return False, f"Agent run not found: {run_id}"
+
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        artifacts = dict(run.artifacts or {})
+        artifacts["exit_code"] = exit_code
+        trace_logs = run.trace_logs
+        if log_path:
+            artifacts["log_path"] = log_path
+            try:
+                path = Path(log_path)
+                if path.exists():
+                    trace_logs = path.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
+        run.status = AgentRunStatus.COMPLETED if exit_code == 0 else AgentRunStatus.FAILED
+        run.finished_at = now
+        run.updated_at = now
+        run.artifacts = artifacts
+        run.trace_logs = trace_logs
+        if session_ref:
+            run.session_ref = session_ref
+        run.error_text = None if exit_code == 0 else f"Agent run exited with code {exit_code}"
+        await self.record_agent_run(run)
+        return True, f"Updated agent run {run_id}: status={run.status} exit_code={exit_code}"
+
+    async def dispatch_agent_run(self, run: AgentRun) -> tuple[bool, str]:
+        command_template = os.getenv("PD_AGENT_RUN_CMD", "").strip()
+        if not command_template:
+            return False, "PD_AGENT_RUN_CMD not set; run is queued only"
+
+        launcher_profile, launcher_template = self._agent_launcher_profile(command_template)
+        
+        # Guardrail: check allowed profiles
+        allowed = self.config.agent_allowed_profiles
+        if launcher_profile and launcher_profile not in allowed:
+            error_message = f"Agent launcher profile '{launcher_profile}' is not in allowed list: {allowed}"
+            run.error_text = error_message
+            run.updated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            await self.record_agent_run(run)
+            return False, error_message
+
+        if launcher_profile == "tmux":
+            return await self._dispatch_agent_run_tmux(launcher_template, run)
+        if launcher_profile:
+            error_message = f"Unknown PD_AGENT_RUN_CMD launcher profile: {launcher_profile}"
+            run.error_text = error_message
+            run.updated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            await self.record_agent_run(run)
+            return False, error_message
+
+        command_parts, error_message = self._build_agent_command(launcher_template, run)
+        if not command_parts:
+            run.error_text = error_message
+            run.updated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            await self.record_agent_run(run)
+            return False, error_message or "Agent dispatch command is empty"
+
+        executable = command_parts[0]
+        if not os.path.isabs(executable) and shutil.which(executable) is None:
+            run.error_text = f"Executable not found: {executable}"
+            run.updated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            await self.record_agent_run(run)
+            return False, run.error_text
+
+        try:
+            process = subprocess.Popen(
+                command_parts,
+                cwd=Path.cwd(),
+                start_new_session=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception as error:
+            run.error_text = f"Dispatch failed: {error}"
+            run.updated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            await self.record_agent_run(run)
+            return False, run.error_text
+
+        run.status = AgentRunStatus.RUNNING
+        run.session_ref = str(process.pid)
+        run.error_text = None
+        run.updated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        await self.record_agent_run(run)
+        return True, f"dispatched pid={process.pid}"
+
+    async def _dispatch_agent_run_tmux(self, command_template: str, run: AgentRun) -> tuple[bool, str]:
+        if shutil.which("tmux") is None:
+            run.error_text = "Executable not found: tmux"
+            run.updated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            await self.record_agent_run(run)
+            return False, run.error_text
+
+        rendered_command, error_message = self._render_agent_command(command_template, run)
+        if not rendered_command:
+            run.error_text = error_message
+            run.updated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            await self.record_agent_run(run)
+            return False, error_message or "Agent command template rendered empty"
+
+        try:
+            session_ref = self._tmux_session_name(run)
+            log_path, launcher_path = self._write_tmux_launcher(
+                run=run,
+                session_ref=session_ref,
+                rendered_command=rendered_command,
+            )
+            process = subprocess.Popen(
+                [
+                    "tmux",
+                    "new-session",
+                    "-d",
+                    "-s",
+                    session_ref,
+                    "-c",
+                    str(Path.cwd()),
+                    "/bin/bash",
+                    str(launcher_path),
+                ],
+                cwd=Path.cwd(),
+                start_new_session=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception as error:
+            run.error_text = f"Dispatch failed: {error}"
+            run.updated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            await self.record_agent_run(run)
+            return False, run.error_text
+
+        artifacts = dict(run.artifacts or {})
+        artifacts["launcher_profile"] = "tmux"
+        artifacts["log_path"] = str(log_path)
+        artifacts["tmux_session"] = session_ref
+        artifacts["launcher_script"] = str(launcher_path)
+
+        run.runtime = "tmux"
+        run.status = AgentRunStatus.RUNNING
+        run.session_ref = session_ref
+        run.error_text = None
+        run.artifacts = artifacts
+        run.updated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        await self.record_agent_run(run)
+        return True, f"dispatched tmux session={session_ref} pid={process.pid}"
 
     def latest_sync_history_lines(self, limit: int = 3) -> list[str]:
-        entries = self.get_sync_history(limit=limit)
-        lines: list[str] = []
-        for entry in entries:
-            timestamp = entry.get("created_at", "?")
-            result = entry.get("result", "?")
-            summary = entry.get("summary", "")
-            lines.append(f"{timestamp} | {result} | {summary}")
-        return lines
+        return self.sync_service.latest_sync_history_lines(limit=limit)
+
+    def connector_freshness_snapshot(
+        self,
+        connector: str,
+        *,
+        reference_time: datetime | None = None,
+    ) -> dict[str, Any]:
+        return self.sync_service.connector_freshness_snapshot(connector, reference_time=reference_time)
+
+    def freshness_summary_line(self, connectors: tuple[str, ...] = ("linear", "github")) -> str:
+        return self.sync_service.freshness_summary_line(connectors=connectors)
+
+    def current_user_id(self) -> str:
+        """Returns the active user identity from environment."""
+        for env_name in ("PD_ME", "GITHUB_USER", "USER", "GIT_AUTHOR_NAME", "GIT_COMMITTER_NAME"):
+            value = os.getenv(env_name)
+            if value:
+                return value.strip()
+        return "unknown-user"
+
+    def should_show_sync_freshness(self, connectors: tuple[str, ...] = ("linear", "github")) -> bool:
+        return self.sync_service.should_show_sync_freshness(connectors=connectors)
 
     def get_projects(self) -> List[Project]:
         return self.projects
 
     def get_issues(self) -> List[Issue]:
-        return self.issues
+        return self.issue_service.get_issues()
+
+    def get_repositories(self) -> List[Repository]:
+        return self.github_query_service.get_repositories()
+
+    def get_pull_requests(self, issue_id: str | None = None) -> List[PullRequest]:
+        return self.github_query_service.get_pull_requests(issue_id)
+
+    def get_ci_checks(self, pull_request_id: str | None = None) -> List[CiCheck]:
+        return self.github_query_service.get_ci_checks(pull_request_id)
 
     def get_issues_by_status(self, status: str) -> List[Issue]:
-        return [i for i in self.issues if i.status == status]
+        return self.issue_service.get_issues_by_status(status)
 
     def get_issue_by_id(self, issue_id: str) -> Issue | None:
-        for issue in self.issues:
-            if issue.id == issue_id:
-                return issue
-        return None
+        return self.issue_service.get_issue_by_id(issue_id)
 
     async def cycle_issue_status(self, issue_id: str, statuses: tuple[str, ...]) -> tuple[bool, str]:
-        issue = self.get_issue_by_id(issue_id)
-        if issue is None:
-            return False, f"Issue not found: {issue_id}"
-        if not statuses:
-            return False, "No configured statuses"
-        if issue.status in statuses:
-            next_index = (statuses.index(issue.status) + 1) % len(statuses)
-        else:
-            next_index = 0
-        next_status = statuses[next_index]
-        previous_status = issue.status
-        previous_state_id = issue.state_id
-
-        issue.status = next_status
-        resolved_state_id, warning = self._resolve_state_id_for_status(issue, next_status)
-        if resolved_state_id is None:
-            issue.status = previous_status
-            issue.state_id = previous_state_id
-            message = warning or f"no Linear state mapping for status '{next_status}'"
-            return False, f"Status update failed: {message}"
-        issue.state_id = resolved_state_id
-
-        ok, error = await self._write_through_issue_update(
-            issue,
-            {"status": previous_status, "state_id": previous_state_id},
-            lambda: self.linear.update_issue_status(self._remote_issue_id(issue), issue.state_id or ""),
-            "Status update failed",
-        )
-        if not ok:
-            return False, error or "Status update failed"
-        if warning:
-            return True, f"{issue.id} moved to {next_status} (warning: {warning})"
-        return True, f"{issue.id} moved to {next_status}"
+        return await self.issue_mutation_service.cycle_issue_status(issue_id, statuses)
 
     async def cycle_issue_assignee(self, issue_id: str) -> tuple[bool, str]:
-        issue = self.get_issue_by_id(issue_id)
-        if issue is None:
-            return False, f"Issue not found: {issue_id}"
-        cycle: list[User | None] = [None, *self.users]
-        if not cycle:
-            return False, "No assignees available"
-
-        current_index = 0
-        for idx, assignee in enumerate(cycle):
-            if (issue.assignee is None and assignee is None) or (
-                issue.assignee is not None and assignee is not None and issue.assignee.id == assignee.id
-            ):
-                current_index = idx
-                break
-        next_assignee = cycle[(current_index + 1) % len(cycle)]
-        previous_assignee = issue.assignee
-        issue.assignee = next_assignee
-
-        ok, error = await self._write_through_issue_update(
-            issue,
-            {"assignee": previous_assignee},
-            lambda: self.linear.update_issue_assignee(
-                self._remote_issue_id(issue),
-                issue.assignee.id if issue.assignee else None,
-            ),
-            "Assignee update failed",
-        )
-        if not ok:
-            return False, error or "Assignee update failed"
-        assignee_name = issue.assignee.name if issue.assignee else "Unassigned"
-        return True, f"{issue.id} assigned to {assignee_name}"
+        return await self.issue_mutation_service.cycle_issue_assignee(issue_id)
 
     async def cycle_issue_points(self, issue_id: str, step: int = 1, max_points: int = 13) -> tuple[bool, str]:
-        issue = self.get_issue_by_id(issue_id)
-        if issue is None:
-            return False, f"Issue not found: {issue_id}"
-        previous_points = issue.points
-        next_points = issue.points + step
-        if next_points > max_points:
-            next_points = 0
-        issue.points = next_points
+        return await self.issue_mutation_service.cycle_issue_points(issue_id, step=step, max_points=max_points)
 
-        ok, error = await self._write_through_issue_update(
-            issue,
-            {"points": previous_points},
-            lambda: self.linear.update_issue_estimate(self._remote_issue_id(issue), issue.points),
-            "Estimate update failed",
+    def _agent_launcher_profile(self, command_template: str) -> tuple[str | None, str]:
+        candidate = command_template.strip()
+        if candidate.startswith("profile:"):
+            remainder = candidate[len("profile:") :]
+            profile, separator, profile_template = remainder.partition(":")
+            normalized = profile.strip().casefold()
+            return normalized or None, profile_template.strip() if separator else ""
+        if candidate.startswith("tmux:"):
+            return "tmux", candidate[len("tmux:") :].strip()
+        return None, candidate
+
+    def _render_agent_command(self, command_template: str, run: AgentRun) -> tuple[str | None, str | None]:
+        context = self._agent_command_context(run)
+        try:
+            rendered = command_template.format(**context).strip()
+        except KeyError as error:
+            return None, f"Invalid agent command placeholder: {error}"
+        if not rendered:
+            return None, "Agent command template rendered empty"
+        return rendered, None
+
+    def _build_agent_command(self, command_template: str, run: AgentRun) -> tuple[list[str] | None, str | None]:
+        rendered_command, error_message = self._render_agent_command(command_template, run)
+        if not rendered_command:
+            return None, error_message
+        try:
+            return shlex.split(rendered_command), None
+        except ValueError as error:
+            return None, f"Failed to parse PD_AGENT_RUN_CMD: {error}"
+
+    def _agent_run_log_dir(self) -> Path:
+        configured = os.getenv("PD_AGENT_RUN_LOG_DIR", ".projectdash/agent-runs").strip()
+        root = Path(configured).expanduser() if configured else Path(".projectdash/agent-runs")
+        if not root.is_absolute():
+            root = Path.cwd() / root
+        return root
+
+    def _tmux_session_name(self, run: AgentRun) -> str:
+        issue_token = re.sub(r"[^a-zA-Z0-9_-]+", "-", run.issue_id or "").strip("-")
+        run_token = re.sub(r"[^a-zA-Z0-9_-]+", "-", run.id or "").strip("-")
+        if not issue_token:
+            issue_token = "run"
+        if not run_token:
+            run_token = datetime.now().strftime("%Y%m%d%H%M%S")
+        return f"pd-agent-{issue_token[:24]}-{run_token[:20]}"
+
+    def _write_tmux_launcher(self, *, run: AgentRun, session_ref: str, rendered_command: str) -> tuple[Path, Path]:
+        log_dir = self._agent_run_log_dir()
+        log_dir.mkdir(parents=True, exist_ok=True)
+
+        log_path = log_dir / f"{run.id}.log"
+        launcher_path = log_dir / f"{run.id}.launcher.sh"
+        status_command = [
+            sys.executable,
+            "-m",
+            "projectdash.cli",
+            "agent-run-finish",
+            "--run-id",
+            run.id,
+            "--session-ref",
+            session_ref,
+            "--log-path",
+            str(log_path),
+        ]
+
+        launcher_script = "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                "set -uo pipefail",
+                "",
+                f"RUN_ID={shlex.quote(run.id)}",
+                f"SESSION_REF={shlex.quote(session_ref)}",
+                f"LOG_PATH={shlex.quote(str(log_path))}",
+                f"PROJECT_ROOT={shlex.quote(str(Path.cwd()))}",
+                f"AGENT_COMMAND={shlex.quote(rendered_command)}",
+                f"STATUS_COMMAND=({' '.join(shlex.quote(part) for part in status_command)})",
+                "",
+                "mkdir -p \"$(dirname \"$LOG_PATH\")\"",
+                "{",
+                "  printf '[%s] dispatch profile=tmux run_id=%s session=%s\\n' \"$(date '+%Y-%m-%d %H:%M:%S')\" \"$RUN_ID\" \"$SESSION_REF\"",
+                "  printf '[%s] command: %s\\n' \"$(date '+%Y-%m-%d %H:%M:%S')\" \"$AGENT_COMMAND\"",
+                "} >>\"$LOG_PATH\"",
+                "",
+                "cd \"$PROJECT_ROOT\" || exit 1",
+                "bash -lc \"$AGENT_COMMAND\" >>\"$LOG_PATH\" 2>&1",
+                "EXIT_CODE=$?",
+                "\"${STATUS_COMMAND[@]}\" --exit-code \"$EXIT_CODE\" >>\"$LOG_PATH\" 2>&1 || true",
+                "printf '[%s] completed exit_code=%s\\n' \"$(date '+%Y-%m-%d %H:%M:%S')\" \"$EXIT_CODE\" >>\"$LOG_PATH\"",
+                "exit \"$EXIT_CODE\"",
+                "",
+            ]
         )
-        if not ok:
-            return False, error or "Estimate update failed"
-        return True, f"{issue.id} estimate set to {issue.points}"
+        launcher_path.write_text(launcher_script, encoding="utf-8")
+        launcher_path.chmod(0o700)
+        return log_path, launcher_path
 
-    async def _write_through_issue_update(
-        self,
-        issue: Issue,
-        previous_values: dict[str, object],
-        remote_update: Callable[[], Awaitable[dict[str, Any]]],
-        failure_prefix: str,
-    ) -> tuple[bool, str | None]:
-        try:
-            remote_result = await remote_update()
-            if not remote_result.get("success", False):
-                raise RuntimeError("Linear rejected update")
-        except Exception as e:
-            self._restore_issue_fields(issue, previous_values)
-            reconcile_message = ""
-            if self._should_reconcile_remote_failure(e):
-                reconcile_message = await self._reconcile_issue_after_remote_failure(issue)
-            return False, f"{failure_prefix}: {self._format_remote_error(e)}{reconcile_message}"
+    def _agent_command_context(self, run: AgentRun) -> dict[str, str]:
+        artifacts = run.artifacts or {}
+        return {
+            "run_id": run.id,
+            "runtime": run.runtime or "",
+            "status": run.status or "",
+            "issue_id": run.issue_id or "",
+            "project_id": run.project_id or "",
+            "session_ref": run.session_ref or "",
+            "branch_name": run.branch_name or "",
+            "pr_id": run.pr_id or "",
+            "prompt_text": run.prompt_text or "",
+            "repository_id": str(artifacts.get("repository_id") or ""),
+            "pull_request_number": str(artifacts.get("pull_request_number") or ""),
+            "pull_request_url": str(artifacts.get("pull_request_url") or ""),
+            "head_branch": str(artifacts.get("head_branch") or ""),
+            "base_branch": str(artifacts.get("base_branch") or ""),
+        }
 
-        ok, error = await self._persist_issue_with_rollback(issue, previous_values)
-        if not ok:
-            return False, f"{failure_prefix}: {error}"
-        return True, None
-
-    async def _persist_issue_with_rollback(self, issue: Issue, previous_values: dict[str, object]) -> tuple[bool, str | None]:
-        try:
-            await self.db.save_issues([issue], project_id=issue.project_id)
-            return True, None
-        except Exception as e:
-            self._restore_issue_fields(issue, previous_values)
-            return False, str(e)
-
-    def _restore_issue_fields(self, issue: Issue, previous_values: dict[str, object]) -> None:
-        for field_name, previous_value in previous_values.items():
-            setattr(issue, field_name, previous_value)
+    def _github_repository_targets(self) -> list[str]:
+        return self.sync_service.github_repository_targets()
 
     def _cache_workflow_states(self, raw_teams: list[dict]) -> None:
-        workflow_states_by_team: dict[str, list[LinearWorkflowState]] = {}
-        for team in raw_teams:
-            team_id = team.get("id")
-            if not team_id:
-                continue
-            state_nodes = team.get("states", {}).get("nodes", [])
-            workflow_states_by_team[team_id] = [
-                LinearWorkflowState(
-                    id=state["id"],
-                    name=state["name"],
-                    type=state.get("type") or "unstarted",
-                    team_id=team_id,
-                    team_key=team.get("key"),
-                )
-                for state in state_nodes
-                if state.get("id") and state.get("name")
-            ]
-        self.workflow_states_by_team = workflow_states_by_team
+        self.issue_service.cache_workflow_states(raw_teams)
 
-    def _resolve_state_id_for_status(self, issue: Issue, status: str) -> tuple[str | None, str | None]:
-        status_key = status.strip().casefold()
-        configured_mapping = self.config.linear_status_mappings.get(status_key)
-        team_states = self.workflow_states_by_team.get(issue.team_id or "", [])
+    def _coerce_sync_error(self, error: Exception, *, connector: str, step: str) -> SyncError:
+        return self.sync_service.coerce_sync_error(error, connector=connector, step=step)
 
-        if configured_mapping:
-            configured_key = configured_mapping.casefold()
-            for state in team_states:
-                if state.id == configured_mapping or state.name.casefold() == configured_key:
-                    return state.id, None
-            if team_states:
-                return None, f"configured mapping '{configured_mapping}' not found for team workflow states"
-            return None, f"configured mapping '{configured_mapping}' could not be validated (no team workflow states cached)"
+    def _coerce_persistence_error(self, error: Exception, *, operation: str) -> PersistenceError:
+        return self.sync_service.coerce_persistence_error(error, operation=operation)
 
-        for state in team_states:
-            if state.name.casefold() == status_key:
-                return state.id, None
-
-        if not issue.team_id:
-            return None, f"no team id on {issue.id}; unable to map status '{status}' to Linear state id"
-        if not team_states:
-            return None, f"no workflow states cached for team {issue.team_id}; run sync to populate state mapping"
-        return (
-            None,
-            f"no mapping for status '{status}' in team {issue.team_id}; "
-            f"add linear_status_mappings.{status_key} in projectdash.config.json",
-        )
-
-    def _remote_issue_id(self, issue: Issue) -> str:
-        return issue.linear_id or issue.id
-
-    def _format_remote_error(self, error: Exception) -> str:
-        if isinstance(error, LinearApiError):
-            message = error.message
-            lowered = message.casefold()
-            if "archived" in lowered:
-                reason = "issue is archived"
-            elif "permission" in lowered or error.code in {"FORBIDDEN", "UNAUTHORIZED"}:
-                reason = "permission denied"
-            elif "state" in lowered and ("invalid" in lowered or "not found" in lowered):
-                reason = "invalid state"
-            elif "stale" in lowered or "conflict" in lowered:
-                reason = "stale issue data"
-            elif "not found" in lowered:
-                reason = "issue not found or inaccessible"
-            else:
-                reason = "Linear API error"
-            suffix = []
-            if error.code:
-                suffix.append(f"code={error.code}")
-            if error.type:
-                suffix.append(f"type={error.type}")
-            suffix_text = f" ({', '.join(suffix)})" if suffix else ""
-            return f"{reason}: {message}{suffix_text}"
-        return str(error)
-
-    def _should_reconcile_remote_failure(self, error: Exception) -> bool:
-        if not isinstance(error, LinearApiError):
-            return False
-        if error.code in {"CONFLICT", "NOT_FOUND"}:
-            return True
-        lowered = error.message.casefold()
-        return "stale" in lowered or "conflict" in lowered
-
-    async def _reconcile_issue_after_remote_failure(self, issue: Issue) -> str:
-        if not self.linear.api_key:
-            return ""
-        if issue.linear_id:
-            try:
-                raw_issue = await self.linear.get_issue(issue.linear_id)
-                if raw_issue:
-                    await self._apply_remote_issue(raw_issue)
-                    return " (re-fetched latest issue)"
-            except Exception:
-                pass
-        try:
-            await self.sync_with_linear()
-            if self.last_sync_result == "success":
-                return " (triggered full re-sync)"
-        except Exception:
-            pass
-        return ""
+    def _looks_like_missing_credentials(self, message: str) -> bool:
+        return self.sync_service.looks_like_missing_credentials(message)
 
     async def _apply_remote_issue(self, raw_issue: dict[str, Any]) -> None:
-        users_dict: dict[str, User] = {user.id: user for user in self.users}
-        assignee = None
-        raw_assignee = raw_issue.get("assignee")
-        if raw_assignee:
-            assignee_id = raw_assignee["id"]
-            user = users_dict.get(assignee_id)
-            if user is None:
-                user = User(assignee_id, raw_assignee["name"], raw_assignee.get("avatarUrl"))
-                self.users.append(user)
-            assignee = user
-
-        remote_issue = Issue(
-            id=raw_issue["identifier"],
-            linear_id=raw_issue["id"],
-            title=raw_issue["title"],
-            priority=str(raw_issue["priority"]),
-            status=raw_issue["state"]["name"] if raw_issue.get("state") else "Todo",
-            state_id=raw_issue["state"]["id"] if raw_issue.get("state") else None,
-            team_id=raw_issue["team"]["id"] if raw_issue.get("team") else None,
-            assignee=assignee,
-            points=raw_issue.get("estimate") or 0,
-            project_id=raw_issue["project"]["id"] if raw_issue.get("project") else None,
-            due_date=raw_issue.get("dueDate"),
-        )
-
-        replaced = False
-        for idx, existing in enumerate(self.issues):
-            if existing.id == remote_issue.id or (
-                existing.linear_id is not None and existing.linear_id == remote_issue.linear_id
-            ):
-                self.issues[idx] = remote_issue
-                replaced = True
-                break
-        if not replaced:
-            self.issues.append(remote_issue)
-
-        await self.db.save_users(self.users)
-        await self.db.save_issues([remote_issue], project_id=remote_issue.project_id)
+        await self.issue_service.apply_remote_issue(raw_issue)
 
     def _flatten_workflow_states(self) -> list[LinearWorkflowState]:
-        flattened: list[LinearWorkflowState] = []
-        for states in self.workflow_states_by_team.values():
-            flattened.extend(states)
-        return flattened
+        return self.issue_service.flatten_workflow_states()
 
     async def _record_sync_history(self) -> None:
-        if self.last_sync_result == "syncing":
-            return
-        created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        summary = self._sync_status_summary_core()
-        try:
-            await self.db.append_sync_history(
-                created_at=created_at,
-                result=self.last_sync_result,
-                summary=summary,
-                diagnostics=self.sync_diagnostics,
-            )
-            self.sync_history = await self.db.get_sync_history()
-        except Exception:
-            pass
+        await self.sync_service.record_sync_history()
 
     def _sync_status_summary_core(self) -> str:
-        if self.last_sync_result == "success":
-            users = self.last_sync_counts.get("users", len(self.users))
-            projects = self.last_sync_counts.get("projects", len(self.projects))
-            issues = self.last_sync_counts.get("issues", len(self.issues))
-            teams = self.last_sync_counts.get("teams", len(self.workflow_states_by_team))
-            return f"success u:{users} p:{projects} i:{issues} t:{teams}"
-        if self.last_sync_error:
-            return f"failed: {self.last_sync_error}"
-        return self.last_sync_result
+        return self.sync_service.sync_status_summary_core()
+
+    async def _save_sync_checkpoint(self, connector: str, resource_class: str, payload: Any) -> None:
+        await self.sync_service.save_sync_checkpoint(connector, resource_class, payload)
+
+    def _payload_checkpoint(self, payload: Any) -> str:
+        return self.sync_service.payload_checkpoint(payload)
+
+    def _merge_repositories_with_policy(
+        self,
+        existing: list[Repository],
+        incoming: list[Repository],
+    ) -> list[Repository]:
+        return self.sync_service.merge_repositories_with_policy(existing, incoming)
+
+    def _merge_pull_requests_with_policy(
+        self,
+        existing: list[PullRequest],
+        incoming: list[PullRequest],
+    ) -> list[PullRequest]:
+        return self.sync_service.merge_pull_requests_with_policy(existing, incoming)
+
+    def _merge_ci_checks_with_policy(
+        self,
+        existing: list[CiCheck],
+        incoming: list[CiCheck],
+    ) -> list[CiCheck]:
+        return self.sync_service.merge_ci_checks_with_policy(existing, incoming)
+
+    def _preferred_repository(self, existing: Repository, incoming: Repository) -> Repository:
+        return self.sync_service.preferred_repository(existing, incoming)
+
+    def _preferred_pull_request(self, existing: PullRequest, incoming: PullRequest) -> PullRequest:
+        return self.sync_service.preferred_pull_request(existing, incoming)
+
+    def _preferred_ci_check(self, existing: CiCheck, incoming: CiCheck) -> CiCheck:
+        return self.sync_service.preferred_ci_check(existing, incoming)
+
+    def _prefer_newer_by_timestamp(
+        self,
+        existing: Any,
+        incoming: Any,
+        existing_value: str | None,
+        incoming_value: str | None,
+    ) -> Any | None:
+        return self.sync_service.prefer_newer_by_timestamp(existing, incoming, existing_value, incoming_value)
+
+    @staticmethod
+    def _parse_connector_timestamp(value: str | None) -> float | None:
+        return SyncService.parse_connector_timestamp(value)
+
+    @staticmethod
+    def _sync_stale_threshold_minutes() -> int:
+        return SyncService.sync_stale_threshold_minutes()
+
+    @staticmethod
+    def _parse_sync_time(value: str | None) -> datetime | None:
+        return SyncService.parse_sync_time(value)
+
+    def _mark_connector_attempt(self, connector: str) -> None:
+        self.sync_service.mark_connector_attempt(connector)
+
+    def _finalize_connector_sync(self, connector: str) -> None:
+        self.sync_service.finalize_connector_sync(connector)
+
+    @staticmethod
+    def _sync_recovery_hint(connector: str, error: str | None) -> str:
+        return SyncService.sync_recovery_hint(connector, error)

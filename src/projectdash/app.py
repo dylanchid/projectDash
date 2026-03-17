@@ -153,6 +153,9 @@ class ProjectDash(App):
         # X1: Performance tracking
         self.perf_log: list[dict[str, Any]] = []
         self.perf_budget_ms = 100
+        self._sync_freshness_override: bool | None = None
+        self.layout_edit_mode = False
+        self._navigation_context_stack: list[dict[str, object]] = []
 
     def _track_perf(self, name: str, start_time: float) -> None:
         import time
@@ -170,9 +173,6 @@ class ProjectDash(App):
             # We could log this to a file or show a subtle indicator in dev mode
             if os.getenv("PD_DEV") == "1":
                 self.log(f"PERF WARNING: action '{name}' took {duration_ms:.2f}ms (budget {self.perf_budget_ms}ms)")
-        self._sync_freshness_override: bool | None = None
-        self.layout_edit_mode = False
-        self._navigation_context_stack: list[dict[str, object]] = []
 
     async def on_mount(self) -> None:
         await self.data_manager.initialize()

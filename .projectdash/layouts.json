@@ -1,0 +1,12 @@
+{
+  "dashboard": {
+    "section_ids": [
+      "project-explorer",
+      "sync-freshness",
+      "key-metrics",
+      "charts",
+      "project-detail"
+    ],
+    "widths": {}
+  }
+}

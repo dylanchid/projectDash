@@ -1,12 +1,24 @@
-from textual.app import ComposeResult
 from textual.widgets import Static
 from textual.containers import Vertical, Horizontal
+from textual.widget import Widget
+from textual.app import ComposeResult
 from rich.text import Text
-from projectdash.widgets.project_card import ProjectCard, ProjectCardSelected
+from datetime import date, datetime
+from projectdash.views.customizable import CustomizableView, SectionSpec
+from projectdash.widgets.project_navigator import ProjectNavigator, ProjectNavigatorSelected
 
 
-class DashboardView(Static):
+class DashboardView(CustomizableView):
     VISUAL_MODES = ("load-total", "load-active", "risk", "priority", "compare")
+    PAGE_LAYOUT_ID = "dashboard"
+
+    def section_specs(self) -> tuple[SectionSpec, ...]:
+        return (
+            SectionSpec(section_id="project-explorer", title="Project Explorer", factory=lambda: Static(""), removable=False),
+            SectionSpec(section_id="key-metrics", title="Key Metrics", factory=lambda: Static("")),
+            SectionSpec(section_id="charts", title="Charts", factory=lambda: Static("")),
+            SectionSpec(section_id="project-detail", title="Project Detail", factory=lambda: Static("")),
+        )
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -28,41 +40,84 @@ class DashboardView(Static):
             "velocity": [],
         }
 
+    def compose(self) -> ComposeResult:
+        """Render dashboard layout: navigator at top, detail+metrics+charts below."""
+        with Vertical(id="dashboard-layout"):
+            # Top: Project Navigator (2 rows)
+            yield Static("PROJECTS", classes="section-label")
+            yield ProjectNavigator([], id="project-navigator")
+
+            # Bottom: 2-column split
+            with Horizontal(id="dashboard-main"):
+                # Left: Project Detail Sidebar
+                with Vertical(id="dashboard-detail-pane", classes="dashboard-section-pane"):
+                    yield Static("PROJECT DETAIL", classes="detail-sidebar-title")
+                    yield Static("", id="dashboard-detail")
+                    yield Static("", id="dashboard-hint", classes="detail-sidebar-hint")
+
+                # Right: Metrics (top) + Charts (bottom)
+                with Vertical(id="dashboard-analytics-pane", classes="dashboard-section-pane"):
+                    # Sync Freshness (small, at top)
+                    with Horizontal(id="dash-freshness-row"):
+                        yield Static("", id="dashboard-freshness-label", classes="section-label")
+                        yield Static("", id="dashboard-freshness", classes="placeholder-text")
+
+                    # Key Metrics
+                    yield Static("KEY METRICS", classes="section-label")
+                                         with Horizontal(id="stats-row"):
+                                             yield Static(id="dash-stats-status", classes="stat-card")
+                                             yield Static(id="dash-stats-performance", classes="stat-card")
+                                             yield Static(id="dash-stats-network", classes="stat-card")
+                    
+                                         # Stale Ownership Radar
+                                         yield Static("STALE OWNERSHIP RADAR", classes="section-label", id="dash-stale-radar-label")
+                                         yield Static("", id="dash-stale-radar", classes="placeholder-text")
+                    
+                                         # Charts
+                    
+                    yield Static("CHARTS", classes="section-label")
+                    yield Static(id="dash-chart", classes="placeholder-text")
+
     def on_mount(self) -> None:
         self.refresh_view()
 
     def on_show(self) -> None:
         self.refresh_view()
 
-    def compose(self) -> ComposeResult:
-        with Horizontal(id="dashboard-layout"):
-            with Vertical(id="dashboard-main"):
-                yield Static("OVERVIEW", id="view-header")
-                with Horizontal(id="stats-row"):
-                    yield Static(id="dash-stats-status", classes="stat-card")
-                    yield Static(id="dash-stats-performance", classes="stat-card")
-                    yield Static(id="dash-stats-network", classes="stat-card")
-
-                yield Static("PROJECTS", classes="section-label")
-                yield Horizontal(id="project-cards-row")
-                yield Static("CHARTS", classes="section-label")
-                yield Static(id="dash-chart", classes="placeholder-text")
-            with Vertical(id="dashboard-sidebar", classes="detail-sidebar"):
-                yield Static("PROJECT DETAIL", classes="detail-sidebar-title")
-                yield Static("", id="dashboard-detail")
-                yield Static("", id="dashboard-hint", classes="detail-sidebar-hint")
+    def on_project_navigator_selected(self, message: ProjectNavigatorSelected) -> None:
+        """Handle project selection from navigator."""
+        self.selected_project_id = message.project_id
+        self.detail_open = True
+        self.refresh_view()
 
     def refresh_view(self) -> None:
         metric_set = self.app.metrics.dashboard(self.app.data_manager, project_id=self.project_scope_id)
+        if self._apply_freshness_visibility():
+            try:
+                self.query_one("#dashboard-freshness-label", Static).update("SYNC FRESHNESS")
+                self.query_one("#dashboard-freshness", Static).update(self._freshness_text())
+            except Exception:
+                pass
+
         self._project_order = [project.project_id for project in metric_set.project_cards]
         scoped_issues = self._scoped_issues()
+
         if self.selected_project_id and not any(
             project.project_id == self.selected_project_id for project in metric_set.project_cards
         ):
             self.selected_project_id = None
-        if self.project_scope_id and not self.selected_project_id:
+        if self.project_scope_id and self.selected_project_id != self.project_scope_id:
             self.selected_project_id = self.project_scope_id
             self.detail_open = True
+        elif self.selected_project_id is None and metric_set.project_cards:
+            self.selected_project_id = metric_set.project_cards[0].project_id
+
+        # Update navigator
+        try:
+            navigator = self.query_one("#project-navigator", ProjectNavigator)
+            navigator.update_cards(metric_set.project_cards, self.selected_project_id)
+        except Exception:
+            pass
 
         done_total = self._done_issue_count(scoped_issues)
         done_pct = int((done_total / len(scoped_issues)) * 100) if scoped_issues else 0
@@ -101,22 +156,26 @@ class DashboardView(Static):
             (f"Baseline: {sync_label[-8:] if sync_label != 'no sync' else sync_label}", "#777777")
         ))
 
-        projects_row = self.query_one("#project-cards-row", Horizontal)
-        projects_row.remove_children()
-        for project in metric_set.project_cards:
-            is_selected = project.project_id == self.selected_project_id
-            classes = "project-card is-selected" if is_selected else "project-card"
-            projects_row.mount(ProjectCard(project, selected=is_selected, classes=classes))
-        if not metric_set.project_cards:
-            projects_row.mount(Static("No projects loaded. Press y to sync.", classes="placeholder-text"))
+        # Stale Ownership Radar
+        stale_radar = self.query_one("#dash-stale-radar", Static)
+        if metric_set.stale_work:
+            radar_text = Text()
+            for item in metric_set.stale_work[:5]:
+                radar_text.append(f"• {item.days_stale:2}d ", style="bold #ff0000")
+                radar_text.append(f"{item.owner_name[:12].ljust(12)} ", style="#ffffff")
+                radar_text.append(f"{item.issue_id} {item.title[:40]}\n", style="#888888")
+            if len(metric_set.stale_work) > 5:
+                radar_text.append(f"   ... and {len(metric_set.stale_work)-5} more stale items\n", style="#666666")
+            stale_radar.update(radar_text)
+            self.query_one("#dash-stale-radar-label", Static).display = True
+            stale_radar.display = True
+        else:
+            self.query_one("#dash-stale-radar-label", Static).display = False
+            stale_radar.display = False
 
         self.query_one("#dash-chart", Static).update(self._chart_text(metric_set, scoped_issues))
         self._refresh_detail_panel(metric_set, scoped_issues)
 
-    def on_project_card_selected(self, message: ProjectCardSelected) -> None:
-        self.selected_project_id = message.project_id
-        self.detail_open = True
-        self.refresh_view()
 
     def set_project_scope(self, project_id: str | None) -> None:
         self.project_scope_id = project_id
@@ -131,14 +190,27 @@ class DashboardView(Static):
     def move_selection(self, delta: int) -> None:
         if not self._project_order:
             return
-        if self.selected_project_id not in self._project_order:
-            self.selected_project_id = self._project_order[0]
+        try:
+            navigator = self.query_one("#project-navigator", ProjectNavigator)
+            new_id = navigator.select_next(delta)
+            if new_id:
+                self.selected_project_id = new_id
+                self.refresh_view()
+        except Exception:
+            # Fallback to manual selection
+            if self.selected_project_id not in self._project_order:
+                self.selected_project_id = self._project_order[0]
+                self.refresh_view()
+                return
+            current_index = self._project_order.index(self.selected_project_id)
+            next_index = (current_index + delta) % len(self._project_order)
+            self.selected_project_id = self._project_order[next_index]
             self.refresh_view()
+
+    def page_selection(self, delta_pages: int) -> None:
+        if delta_pages == 0:
             return
-        current_index = self._project_order.index(self.selected_project_id)
-        next_index = (current_index + delta) % len(self._project_order)
-        self.selected_project_id = self._project_order[next_index]
-        self.refresh_view()
+        self.move_selection(delta_pages * 5)
 
     def open_detail(self) -> None:
         if self.selected_project_id is None:
@@ -180,6 +252,22 @@ class DashboardView(Static):
         self.refresh_view()
         return True, f"Dashboard chart density: {self.chart_density}"
 
+    def _freshness_text(self) -> str:
+        return self.app.data_manager.freshness_summary_line(("linear", "github"))
+
+    def _apply_freshness_visibility(self) -> bool:
+        visible = bool(getattr(self.app, "sync_freshness_visible", True))
+        for widget_id in (
+            "#dashboard-section-sync-freshness",
+            "#dashboard-freshness-label",
+            "#dashboard-freshness",
+        ):
+            try:
+                self.query_one(widget_id).display = visible
+            except Exception:
+                pass
+        return visible
+
     def _chart_text(self, metric_set, scoped_issues) -> Text:
         if self.visual_mode in {"load-total", "load-active"}:
             return self._load_chart(metric_set)
@@ -216,6 +304,11 @@ class DashboardView(Static):
             bar = "█" * filled + "░" * (width - filled)
             blocked_suffix = f"  blocked {card.blocked}" if self.chart_density == "detailed" else ""
             text.append(f"{card.name[:14].ljust(14)} {bar} {value}{blocked_suffix}\n", style="#ffffff")
+        if len(cards) > len(rows):
+            text.append(
+                f"Showing top {len(rows)} of {len(cards)} projects (press g for detailed).\n",
+                style="#666666",
+            )
         return text
 
     def _risk_chart(self, metric_set) -> Text:
@@ -231,6 +324,7 @@ class DashboardView(Static):
             ),
             reverse=True,
         )
+        total_cards = len(cards)
         if self.chart_density == "compact":
             cards = cards[:4]
         width = 22 if self.chart_density == "detailed" else 14
@@ -245,6 +339,12 @@ class DashboardView(Static):
             )
         if not cards:
             text.append("No risk data available. Press y to sync.", style="#666666")
+            return text
+        if total_cards > len(cards):
+            text.append(
+                f"Showing top {len(cards)} of {total_cards} projects (press g for detailed).\n",
+                style="#666666",
+            )
         return text
 
     def _priority_chart(self, scoped_issues) -> Text:
@@ -325,7 +425,7 @@ class DashboardView(Static):
                 f"Density: {self.chart_density}\n"
                 "Press Enter to open details."
             )
-            hint.update("Enter open • Esc close • ] focus • [ all • ,/. switch")
+            hint.update("Enter open • Esc close • PgUp/PgDn page • ] focus • [ all • ,/. switch")
             return
         selected = self._selected_project_metric(metric_set)
         if not selected:
@@ -342,17 +442,38 @@ class DashboardView(Static):
         )
         top_status = self._top_status_text(project_issues)
         blocker_ratio = int((selected.blocked / max(1, selected.total)) * 100)
+        project = self._project_entity(selected.project_id)
+        project_type = self._project_type_label(project, project_issues)
+        overview = self._project_overview_text(project, done_pct, active_total, selected.blocked, selected.total)
+        project_state = project.status if project and project.status else "Unknown"
+        cycle = project.cycle if project and project.cycle else "N/A"
+        started = self._project_start_date(project, project_issues)
+        started_label = started.isoformat() if started else "Unknown"
+        projected_end = project.due_date if project and project.due_date and project.due_date != "N/A" else "Not set"
+        end_date = self._parse_project_date(projected_end)
+        track_label, track_reason, expected_pct = self._delivery_health(
+            completion_pct=done_pct,
+            blocked_count=selected.blocked,
+            total_issues=selected.total,
+            start_date=started,
+            end_date=end_date,
+        )
+        timeline = self._timeline_block(started, end_date, done_pct, expected_pct)
         detail.update(
             f"{selected.name}\n\n"
-            f"Total issues: {selected.total}\n"
-            f"Active: {selected.active} ({active_total} scoped)\n"
-            f"Done: {done_total} ({done_pct}%)\n"
+            f"Type: {project_type}\n"
+            f"Overview: {overview}\n"
+            f"State: {project_state}  Cycle: {cycle}\n\n"
+            f"Started: {started_label}\n"
+            f"Projected end: {projected_end}\n"
+            f"Track: {track_label}\n"
+            f"Signal: {track_reason}\n\n"
+            f"Timeline\n{timeline}\n\n"
+            f"Issues: {selected.total}  Active: {active_total}  Done: {done_total} ({done_pct}%)\n"
             f"Blocked: {selected.blocked} ({self._risk_symbol(blocker_ratio)} {blocker_ratio}%)\n"
-            f"Top statuses: {top_status}\n"
-            f"Visual: {self.visual_mode}\n"
-            f"Chart density: {self.chart_density}"
+            f"Top statuses: {top_status}"
         )
-        hint.update("Enter open • Esc close • v mode • g density • [ all")
+        hint.update("Enter open • Esc close • PgUp/PgDn page • ] focus • [ all • v mode • g density")
 
     def _scoped_issues(self):
         issues = self.app.data_manager.get_issues()
@@ -387,6 +508,131 @@ class DashboardView(Static):
         if not self.project_scope_id:
             return "All"
         return self._project_label(self.project_scope_id)
+
+    def _project_entity(self, project_id: str | None):
+        if not project_id:
+            return None
+        for project in self.app.data_manager.get_projects():
+            if project.id == project_id:
+                return project
+        return None
+
+    def _project_type_label(self, project, issues) -> str:
+        has_due_date = bool(project and project.due_date and project.due_date != "N/A")
+        base = "Delivery" if has_due_date else "Continuous"
+        if len(issues) >= 12:
+            base = f"{base} Program"
+        if project and project.cycle and project.cycle.strip() and project.cycle != "Current":
+            return f"{base} · {project.cycle}"
+        return base
+
+    def _project_overview_text(self, project, completion_pct: int, active: int, blocked: int, total: int) -> str:
+        description = ""
+        if project and project.description:
+            description = project.description.strip()
+        if description:
+            first_line = description.splitlines()[0].strip()
+            if len(first_line) > 110:
+                first_line = first_line[:107].rstrip() + "..."
+            return first_line
+        return (
+            f"{completion_pct}% complete with {active} active and {blocked} blocked out of {total} issues."
+        )
+
+    def _project_start_date(self, project, issues) -> date | None:
+        if project and project.start_date:
+            parsed = self._parse_project_date(project.start_date)
+            if parsed:
+                return parsed
+        created_dates = [issue.created_at.date() for issue in issues if getattr(issue, "created_at", None)]
+        if not created_dates:
+            return None
+        return min(created_dates)
+
+    def _parse_project_date(self, value: str | None) -> date | None:
+        if not value or value == "N/A" or value == "Not set":
+            return None
+        try:
+            return datetime.strptime(value, "%Y-%m-%d").date()
+        except ValueError:
+            return None
+
+    def _delivery_health(
+        self,
+        *,
+        completion_pct: int,
+        blocked_count: int,
+        total_issues: int,
+        start_date: date | None,
+        end_date: date | None,
+        today: date | None = None,
+    ) -> tuple[str, str, int]:
+        current_day = today or date.today()
+        blocked_pct = int((blocked_count / max(1, total_issues)) * 100)
+        expected_pct = completion_pct
+
+        if start_date and end_date and start_date >= end_date:
+            start_date = None
+
+        if start_date and end_date:
+            total_days = max(1, (end_date - start_date).days)
+            elapsed_days = max(0, min(total_days, (current_day - start_date).days))
+            expected_pct = int((elapsed_days / total_days) * 100)
+
+        if end_date:
+            days_left = (end_date - current_day).days
+            if days_left < 0 and completion_pct < 100:
+                return "Behind", f"{abs(days_left)}d past projected end date.", expected_pct
+            if completion_pct < expected_pct - 15 or blocked_pct >= 30:
+                return "Behind", f"Completion {completion_pct}% vs expected {expected_pct}%.", expected_pct
+            if completion_pct < expected_pct - 5 or blocked_pct >= 15:
+                return "At Risk", f"Completion {completion_pct}% vs expected {expected_pct}%.", expected_pct
+            if days_left <= 7 and completion_pct < 80:
+                return "At Risk", f"{days_left}d left with only {completion_pct}% completion.", expected_pct
+            return "On Track", f"{days_left}d left and trend is healthy.", expected_pct
+
+        if blocked_pct >= 25:
+            return "At Risk", "No target date and blocker ratio is high.", expected_pct
+        return "On Track", "No target date set; monitoring throughput trend.", expected_pct
+
+    def _timeline_block(
+        self,
+        start_date: date | None,
+        end_date: date | None,
+        completion_pct: int,
+        expected_pct: int,
+    ) -> str:
+        width = 16
+        if start_date and end_date:
+            return (
+                f"Sched {self._bar(expected_pct, 100, width)} {expected_pct:>3}%\n"
+                f"Done  {self._bar(completion_pct, 100, width)} {completion_pct:>3}%"
+            )
+        return f"Done  {self._bar(completion_pct, 100, width)} {completion_pct:>3}%"
+
+    def _level_strip_text(self, metric_set) -> str:
+        if self.project_scope_id:
+            return (
+                f"Level: Project  |  Focus: {self._scope_label()}  |  "
+                "[ back to portfolio  |  ,/. cycle focused project"
+            )
+        selected = self._project_label(self.selected_project_id) if self.selected_project_id else "none"
+        return (
+            f"Level: Portfolio  |  Projects: {metric_set.projects_total}  |  "
+            f"Selected: {selected}  |  j/k move  |  ] focus project"
+        )
+
+    def _projects_meta_text(self, metric_set) -> str:
+        if not metric_set.project_cards:
+            return "No projects in portfolio scope."
+        selected = self._selected_project_metric(metric_set)
+        if selected is None:
+            return f"Showing {len(metric_set.project_cards)} projects."
+        risk = int((selected.blocked / max(1, selected.total)) * 100)
+        return (
+            f"Selected: {selected.name}  |  Total: {selected.total}  |  "
+            f"Active: {selected.active}  |  Blocked: {selected.blocked} ({risk}%)"
+        )
 
     def _project_label(self, project_id: str | None) -> str:
         if not project_id:

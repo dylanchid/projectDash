@@ -15,10 +15,20 @@ class TimelineRowSelected(Message):
 class TimelineRow(Static):
     can_focus = True
 
-    def __init__(self, metric: TimelineProjectMetric, selected: bool = False, **kwargs):
+    def __init__(
+        self,
+        metric: TimelineProjectMetric,
+        selected: bool = False,
+        *,
+        blocked_count: int = 0,
+        failing_checks: int = 0,
+        **kwargs,
+    ):
         super().__init__(**kwargs)
         self.metric = metric
         self.selected = selected
+        self.blocked_count = max(0, blocked_count)
+        self.failing_checks = max(0, failing_checks)
 
     def on_click(self, event: events.Click) -> None:  # type: ignore[override]
         self.post_message(TimelineRowSelected(self.metric.project_id, self.metric.name))
@@ -35,10 +45,19 @@ class TimelineRow(Static):
             severity_symbol = "!!"
         elif "today" in label or "3d" in label:
             severity_symbol = "!"
+        blocker_signal = "-"
+        blocker_style = "#555555"
+        if self.blocked_count > 0:
+            blocker_signal = f"BLOCK:{self.blocked_count}"
+            if self.failing_checks > 0:
+                blocker_signal += f"/FAIL:{self.failing_checks}"
+            blocker_style = "bold #ff5f5f"
+        
         return Text.assemble(
             (f"{name} ", highlight),
             (f"{progress} ", "#666666"),
             (f"{points} ", "#888888"),
             (f"{due} ", "#666666"),
+            (f"{blocker_signal.ljust(14)} ", blocker_style),
             (f"{severity_symbol} {self.metric.days_remaining_label}", self.metric.status_color),
         )

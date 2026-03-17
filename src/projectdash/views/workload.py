@@ -8,6 +8,10 @@ from projectdash.widgets.workload_member_row import WorkloadMemberRow, WorkloadM
 
 class WorkloadView(Static):
     VISUAL_MODES = ("table", "chart", "rebalance")
+    BINDINGS = [
+        ("/", "open_filter", "Filter/Search"),
+        ("question_mark", "toggle_help", "Help"),
+    ]
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -29,8 +33,13 @@ class WorkloadView(Static):
         with Horizontal(id="workload-layout"):
             with Vertical(id="workload-main"):
                 yield Static("👥 TEAM WORKLOAD", id="view-header")
-                yield Static(id="workload-controls", classes="section-label")
+                yield Static("SYNC FRESHNESS", id="workload-freshness-label", classes="section-label")
+                yield Static("", id="workload-freshness", classes="placeholder-text")
+                yield Static("CONTROLS", classes="section-label")
+                yield Static(id="workload-controls", classes="section-body")
+                yield Static("WORKLOAD OVERVIEW", id="workload-overview-label", classes="section-label")
                 yield Vertical(id="workload-list")
+                yield Static("UTILIZATION VIEW", id="workload-chart-label", classes="section-label")
                 yield Static(id="workload-chart", classes="placeholder-text")
                 yield Static("\nRecommendations:", classes="section-label")
                 yield Static(id="recommendations-text", classes="placeholder-text")
@@ -40,6 +49,8 @@ class WorkloadView(Static):
                 yield Static("", id="workload-hint", classes="detail-sidebar-hint")
 
     def refresh_view(self) -> None:
+        if self._apply_freshness_visibility():
+            self.query_one("#workload-freshness", Static).update(self._freshness_text())
         metric_set = self.app.metrics.workload(self.app.data_manager, project_id=self.project_scope_id)
         self._member_order = [member.name for member in metric_set.members]
         scope = self._scope_label()
@@ -51,19 +62,28 @@ class WorkloadView(Static):
 
         list_container = self.query_one("#workload-list", Vertical)
         chart_widget = self.query_one("#workload-chart", Static)
+        overview_label = self.query_one("#workload-overview-label", Static)
+        chart_label = self.query_one("#workload-chart-label", Static)
         if self.visual_mode == "table":
             list_container.display = True
             chart_widget.display = False
+            overview_label.display = True
+            chart_label.display = False
             list_container.remove_children()
             header = Static(self._table_header_text(), classes="placeholder-text")
             list_container.mount(header)
-            members = metric_set.members
-            if self.graph_density == "compact":
-                members = members[:7]
+            members, start_index, end_index, total_members = self._visible_members(metric_set.members)
             for member in members:
                 is_selected = member.name == self.selected_member
                 classes = "workload-row is-selected" if is_selected else "workload-row"
                 list_container.mount(WorkloadMemberRow(member, selected=is_selected, classes=classes))
+            if total_members > len(members):
+                list_container.mount(
+                    Static(
+                        f"Showing {start_index + 1}-{end_index} of {total_members} members (PgUp/PgDn page, g detailed).",
+                        classes="placeholder-text",
+                    )
+                )
             if not metric_set.members:
                 list_container.mount(Static("No team members loaded yet. Press y to sync.", classes="placeholder-text"))
             list_container.mount(Static("", classes="placeholder-text"))
@@ -73,10 +93,16 @@ class WorkloadView(Static):
         elif self.visual_mode == "chart":
             list_container.display = False
             chart_widget.display = True
+            overview_label.display = False
+            chart_label.display = True
+            chart_label.update("UTILIZATION VIEW")
             chart_widget.update(self._chart_text(metric_set, detailed=self.graph_density == "detailed"))
         else:
             list_container.display = False
             chart_widget.display = True
+            overview_label.display = False
+            chart_label.display = True
+            chart_label.update("REBALANCE VIEW")
             chart_widget.update(self._rebalance_text(metric_set, detailed=self.graph_density == "detailed"))
 
         recommendations = metric_set.recommendations
@@ -98,6 +124,41 @@ class WorkloadView(Static):
         self.refresh_view()
         return True, f"Workload graph density: {self.graph_density}"
 
+    def open_primary(self) -> tuple[bool, str]:
+        return False, "No primary action for current workload selection"
+
+    def open_secondary(self) -> tuple[bool, str]:
+        return False, "No secondary action for current workload selection"
+
+    def copy_primary(self) -> tuple[bool, str]:
+        if not self.selected_member:
+            return False, "No member selected"
+        
+        def _copy(value: str) -> bool:
+            import shutil, subprocess
+            for cmd in (["pbcopy"], ["wl-copy"], ["xclip", "-selection", "clipboard"], ["xsel", "--clipboard", "--input"]):
+                if shutil.which(cmd[0]):
+                    try:
+                        subprocess.run(cmd, input=value, text=True, check=True)
+                        return True
+                    except Exception:
+                        pass
+            return False
+
+        if _copy(self.selected_member):
+            return True, f"Copied member name: {self.selected_member}"
+        return False, "Clipboard tool not found"
+
+    def jump_context(self) -> tuple[bool, str]:
+        if not self.selected_member:
+            return False, "No member selected"
+        self.app.action_switch_tab("sprint")
+        sprint = self.app._active_sprint_view()
+        if sprint:
+             # This is a bit of a hack, but let's assume we can filter by assignee name
+             return sprint.apply_triage_filter("mine") if "me" in self.selected_member.casefold() else (False, "Cannot jump to other member's sprint yet")
+        return False, "Sprint board unavailable"
+
     def open_detail(self) -> None:
         if self.selected_member is None:
             members = self.app.metrics.workload(self.app.data_manager, project_id=self.project_scope_id).members
@@ -110,6 +171,14 @@ class WorkloadView(Static):
         self.detail_open = False
         self.refresh_view()
 
+    def action_open_filter(self) -> None:
+        if hasattr(self.app, "action_open_filter"):
+            self.app.action_open_filter()
+
+    def action_toggle_help(self) -> None:
+        if hasattr(self.app, "action_toggle_help_overlay"):
+            self.app.action_toggle_help_overlay()
+
     def context_summary(self) -> dict[str, str]:
         return {
             "mode": self.visual_mode,
@@ -117,6 +186,18 @@ class WorkloadView(Static):
             "filter": f"sim {self.simulation_points}pt",
             "selected": self.selected_member or "none",
         }
+
+    def _freshness_text(self) -> str:
+        return self.app.data_manager.freshness_summary_line(("linear", "github"))
+
+    def _apply_freshness_visibility(self) -> bool:
+        visible = bool(getattr(self.app, "sync_freshness_visible", True))
+        for widget_id in ("#workload-freshness-label", "#workload-freshness"):
+            try:
+                self.query_one(widget_id, Static).display = visible
+            except Exception:
+                pass
+        return visible
 
     def move_selection(self, delta: int) -> None:
         if not self._member_order:
@@ -129,6 +210,11 @@ class WorkloadView(Static):
         next_index = (current_index + delta) % len(self._member_order)
         self.selected_member = self._member_order[next_index]
         self.refresh_view()
+
+    def page_selection(self, delta_pages: int) -> None:
+        if delta_pages == 0:
+            return
+        self.move_selection(delta_pages * self._workload_page_size())
 
     def set_project_scope(self, project_id: str | None) -> None:
         self.project_scope_id = project_id
@@ -269,7 +355,7 @@ class WorkloadView(Static):
                 f"Graph: {self.graph_density}\n"
                 f"Simulation: {self.simulation_points}pt"
             )
-            hint.update("Enter open • Esc close • =/- simulation • v mode • g density")
+            hint.update("Enter open • Esc close • PgUp/PgDn page • =/- simulation • v mode • g density")
             return
 
         selected = None
@@ -314,7 +400,7 @@ class WorkloadView(Static):
             f"Simulation: {simulation_text}\n\n"
             f"Issues:\n{issues_preview}"
         )
-        hint.update("Enter open • Esc close • =/- simulation • v mode • g density")
+        hint.update("Enter open • Esc close • PgUp/PgDn page • =/- simulation • v mode • g density")
 
     def _status_distribution(self, metric_set: WorkloadMetricSet) -> dict[str, int]:
         counts = {"Overallocated": 0, "At Capacity": 0, "Available": 0}
@@ -387,3 +473,24 @@ class WorkloadView(Static):
         donor_after = int((donor_after_points / max(1, donor.capacity)) * 100)
         receiver_after = int((receiver_after_points / max(1, receiver.capacity)) * 100)
         return donor, receiver, max_shift, donor_after, receiver_after
+
+    def _workload_page_size(self) -> int:
+        return 7 if self.graph_density == "compact" else max(1, len(self._member_order))
+
+    def _visible_members(self, members):
+        total = len(members)
+        if total == 0:
+            return [], 0, 0, 0
+        if self.graph_density == "detailed":
+            return members, 0, total, total
+
+        page_size = self._workload_page_size()
+        selected_index = 0
+        if self.selected_member:
+            for index, member in enumerate(members):
+                if member.name == self.selected_member:
+                    selected_index = index
+                    break
+        start = (selected_index // page_size) * page_size
+        end = min(total, start + page_size)
+        return members[start:end], start, end, total

@@ -75,6 +75,8 @@ class LinearClient:
             nodes {
               id
               name
+              description
+              startDate
               targetDate
               state
             }
@@ -126,6 +128,12 @@ class LinearClient:
                 avatarUrl
               }
               estimate
+              description
+              labels {
+                nodes {
+                  name
+                }
+              }
             }
             pageInfo {
               hasNextPage
@@ -211,6 +219,12 @@ class LinearClient:
               avatarUrl
             }
             estimate
+            description
+            labels {
+              nodes {
+                name
+              }
+            }
           }
         }
         """

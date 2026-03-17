@@ -18,7 +18,16 @@ async def test_sync_persists_cache_and_restart_loads_all_entities(tmp_path, monk
         return {"viewer": {"id": "viewer-1", "name": "Tester", "email": "tester@example.com"}}
 
     async def fake_get_projects():
-        return [{"id": "p1", "name": "Project One", "targetDate": "2026-03-01", "state": "Active"}]
+        return [
+            {
+                "id": "p1",
+                "name": "Project One",
+                "description": "Customer onboarding workflow improvements.",
+                "startDate": "2026-01-20",
+                "targetDate": "2026-03-01",
+                "state": "Active",
+            }
+        ]
 
     async def fake_get_team_workflow_states():
         return [
@@ -68,6 +77,8 @@ async def test_sync_persists_cache_and_restart_loads_all_entities(tmp_path, monk
     assert len(restarted.issues) == 1
     assert "team-1" in restarted.workflow_states_by_team
     assert [s.id for s in restarted.workflow_states_by_team["team-1"]] == ["state-1", "state-2"]
+    assert restarted.projects[0].start_date == "2026-01-20"
+    assert restarted.projects[0].description == "Customer onboarding workflow improvements."
     assert restarted.issues[0].id == "PD-1"
     assert restarted.issues[0].linear_id == "lin-1"
 

@@ -64,17 +64,16 @@ class DashboardView(CustomizableView):
 
                     # Key Metrics
                     yield Static("KEY METRICS", classes="section-label")
-                                         with Horizontal(id="stats-row"):
-                                             yield Static(id="dash-stats-status", classes="stat-card")
-                                             yield Static(id="dash-stats-performance", classes="stat-card")
-                                             yield Static(id="dash-stats-network", classes="stat-card")
-                    
-                                         # Stale Ownership Radar
-                                         yield Static("STALE OWNERSHIP RADAR", classes="section-label", id="dash-stale-radar-label")
-                                         yield Static("", id="dash-stale-radar", classes="placeholder-text")
-                    
-                                         # Charts
-                    
+                    with Horizontal(id="stats-row"):
+                        yield Static(id="dash-stats-status", classes="stat-card")
+                        yield Static(id="dash-stats-performance", classes="stat-card")
+                        yield Static(id="dash-stats-network", classes="stat-card")
+
+                    # Stale Ownership Radar
+                    yield Static("STALE OWNERSHIP RADAR", classes="section-label", id="dash-stale-radar-label")
+                    yield Static("", id="dash-stale-radar", classes="placeholder-text")
+
+                    # Charts
                     yield Static("CHARTS", classes="section-label")
                     yield Static(id="dash-chart", classes="placeholder-text")
 

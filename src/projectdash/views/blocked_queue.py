@@ -149,17 +149,12 @@ class BlockedQueueView(Static):
 
     def _content_text(self, rows: list[BlockedQueueRow]) -> Text:
         text = Text()
-        text.append(f"Mode: Blocked Queue  |  Sort: {self.sort_mode}  |  Filter: {self.assignee_filter}
-
-", style="#666666")
-        text.append("Issue      Age  Owner           Project         PRs  Fail  Title
-", style="bold #666666")
-        text.append("--------------------------------------------------------------------------
-", style="#333333")
+        text.append(f"Mode: Blocked Queue  |  Sort: {self.sort_mode}  |  Filter: {self.assignee_filter}\n\n", style="#666666")
+        text.append("Issue      Age  Owner           Project         PRs  Fail  Title\n", style="bold #666666")
+        text.append("--------------------------------------------------------------------------\n", style="#333333")
         
         if not rows:
-            text.append("No blocked issues found.
-", style="#666666")
+            text.append("No blocked issues found.\n", style="#666666")
             return text
             
         visible, start, end = self._windowed_rows(rows)
@@ -175,16 +170,13 @@ class BlockedQueueView(Static):
                 f"{marker} {row.issue.id[:8].ljust(8)} {str(row.age_days).rjust(3)}d  "
                 f"{row.owner[:14].ljust(14)} {row.project[:14].ljust(14)} "
                 f"{str(row.linked_prs).rjust(3)}  {str(row.failing_checks).rjust(4)}  "
-                f"{row.issue.title[:28]}
-",
+                f"{row.issue.title[:28]}\n",
                 style=style,
             )
             
         if len(rows) > len(visible):
             text.append(
-                f"
-Showing {start + 1}-{end} of {len(rows)} blockers (PgUp/PgDn page)
-",
+                f"\nShowing {start + 1}-{end} of {len(rows)} blockers (PgUp/PgDn page)\n",
                 style="#666666",
             )
         return text
@@ -224,8 +216,7 @@ Showing {start + 1}-{end} of {len(rows)} blockers (PgUp/PgDn page)
             lines.append("-----------")
             lines.append(issue.description[:200] + ("..." if len(issue.description) > 200 else ""))
 
-        detail.update("
-".join(lines))
+        detail.update("\n".join(lines))
         hint.update("Enter detail • o open • i jump • m status • v sort • f filter")
 
     def move_selection(self, delta: int) -> None:

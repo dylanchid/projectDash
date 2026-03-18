@@ -77,6 +77,8 @@ class AppConfig:
     agent_allowed_profiles: tuple[str, ...] = ("tmux", "issue-flow")
     seed_mock_data: bool = False
     user_capacity_overrides: dict[str, int] = field(default_factory=dict)
+    portfolio_root: str = ""
+    portfolio_manifest_path: str = ""
     config_source: str = "defaults/env"
 
     @classmethod
@@ -104,6 +106,8 @@ class AppConfig:
             github_sync_checks=_to_bool(os.getenv("PD_GITHUB_SYNC_CHECKS"), True),
             agent_allowed_profiles=_to_csv_tuple(os.getenv("PD_AGENT_ALLOWED_PROFILES", "tmux,issue-flow")),
             seed_mock_data=_to_bool(os.getenv("PD_ENABLE_MOCK_SEED"), False),
+            portfolio_root=os.getenv("PD_PORTFOLIO_ROOT", ""),
+            portfolio_manifest_path=os.getenv("PD_PORTFOLIO_MANIFEST", ""),
         )
         config_path = os.getenv("PD_CONFIG_PATH", "projectdash.config.json")
         return config.merge_file(Path(config_path))
@@ -174,6 +178,8 @@ class AppConfig:
         merged["github_sync_checks"] = _to_bool(merged["github_sync_checks"], self.github_sync_checks)
         merged["agent_allowed_profiles"] = _to_csv_tuple(merged.get("agent_allowed_profiles", self.agent_allowed_profiles))
         merged["seed_mock_data"] = _to_bool(merged["seed_mock_data"], self.seed_mock_data)
+        merged["portfolio_root"] = str(merged.get("portfolio_root") or "").strip()
+        merged["portfolio_manifest_path"] = str(merged.get("portfolio_manifest_path") or "").strip()
         if not isinstance(merged["user_capacity_overrides"], dict):
             merged["user_capacity_overrides"] = {}
         else:

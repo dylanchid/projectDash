@@ -217,13 +217,13 @@ def test_refresh_summary_renders_whole_block_snapshot() -> None:
             "Improve issue flow drilldown\n\n"
             "Assignee: Alice\n"
             "Priority: High  Points: 5\n"
+            "Readiness Score: 40/100\n"
             "Linked PRs: 2  Checks: 2 (fail 1)\n"
             "PR states: open 1  merged 1  closed 0\n"
             "Review: ready/merged 1  attention 1\n"
             "Risk: failing PRs 1  stale reviews 0"
         )
     ]
-
 
 def test_refresh_detail_for_pr_renders_whole_block_snapshot() -> None:
     screen = IssueFlowScreen("PD-7")

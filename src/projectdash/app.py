@@ -13,6 +13,7 @@ from projectdash.views.sprint_board import SprintBoardView
 from projectdash.views.workload import WorkloadView
 from projectdash.views.timeline import TimelineView
 from projectdash.views.ideation_gallery import IdeationGalleryView
+from projectdash.views.portfolio import PortfolioView
 from projectdash.views.sync_history import SyncHistoryScreen
 from projectdash.views.issue_flow import IssueFlowScreen
 from projectdash.views.sprint_issue import SprintIssueScreen
@@ -43,6 +44,7 @@ class ProjectDash(App):
         ("t", "switch_tab('timeline')", "Timeline"),
         ("w", "switch_tab('workload')", "Workload"),
         ("n", "switch_tab('ideation')", "Ideation Gallery"),
+        ("X", "switch_tab('portfolio')", "Portfolio"),
         ("K", "toggle_hotkey_bar", "Toggle Hotkey Bar"),
         ("z", "toggle_sidebar", "Toggle Sidebar"),
         ("9", "line_pan_left", "Line Pan Left"),
@@ -126,7 +128,7 @@ class ProjectDash(App):
         self.metrics = MetricsService(self.config)
         self.profile = os.getenv("PD_PROFILE", "ic").strip().casefold() or "ic"
         self._default_tab_id = self.PROFILE_DEFAULT_TAB.get(self.profile, "sprint")
-        self.tab_ids = ["dash", "github", "sprint", "blocked", "timeline", "workload", "ideation"]
+        self.tab_ids = ["dash", "github", "sprint", "blocked", "timeline", "workload", "ideation", "portfolio"]
         self.last_ui_error: str | None = None
         self.missing_mapping_hint_shown = False
         self.command_active = False
@@ -176,6 +178,7 @@ class ProjectDash(App):
 
     async def on_mount(self) -> None:
         await self.data_manager.initialize()
+        await self.data_manager.scan_portfolio()
         await self._refresh_agent_run_snapshot(notify=False)
         self._start_agent_run_refresh_timer()
         self.refresh_views()
@@ -757,6 +760,7 @@ class ProjectDash(App):
             Tab("Timeline", id="timeline"),
             Tab("Workload", id="workload"),
             Tab("Ideation", id="ideation"),
+            Tab("Portfolio", id="portfolio"),
             id="app-tabs",
             active=self._default_tab_id,
         )
@@ -775,6 +779,7 @@ class ProjectDash(App):
             yield TimelineView(id="timeline")
             yield WorkloadView(id="workload")
             yield IdeationGalleryView(id="ideation")
+            yield PortfolioView(id="portfolio")
         yield Static("Keys: loading...", id="hotkey-bar")
 
     def update_app_status(self, override_message: str | None = None) -> None:
@@ -1286,6 +1291,12 @@ class ProjectDash(App):
             return
 
     async def action_sprint_cycle_estimate(self) -> None:
+        current = self.query_one(ContentSwitcher).current
+        if current == "portfolio":
+            view = self.query_one(ContentSwitcher).query_one("#portfolio", PortfolioView)
+            ok, message = view.cycle_tier()
+            self._publish_action_result(ok, message)
+            return
         sprint = self._active_sprint_view()
         if not sprint or sprint.filter_active:
             return
@@ -1443,6 +1454,12 @@ class ProjectDash(App):
         self._publish_action_result(ok, message)
 
     def action_github_filter_state(self) -> None:
+        current = self.query_one(ContentSwitcher).current
+        if current == "portfolio":
+            view = self.query_one(ContentSwitcher).query_one("#portfolio", PortfolioView)
+            ok, message = view.cycle_tier_filter()
+            self._publish_action_result(ok, message)
+            return
         github = self._active_github_view()
         if github is None:
             return
@@ -2023,6 +2040,8 @@ class ProjectDash(App):
             return self.query_one(ContentSwitcher).query_one("#workload", WorkloadView)
         if current == "ideation":
             return self.query_one(ContentSwitcher).query_one("#ideation", IdeationGalleryView)
+        if current == "portfolio":
+            return self.query_one(ContentSwitcher).query_one("#portfolio", PortfolioView)
         return None
 
     def _active_visual_view(self):
@@ -2039,6 +2058,8 @@ class ProjectDash(App):
             return self.query_one(ContentSwitcher).query_one("#timeline", TimelineView)
         if current == "ideation":
             return self.query_one(ContentSwitcher).query_one("#ideation", IdeationGalleryView)
+        if current == "portfolio":
+            return self.query_one(ContentSwitcher).query_one("#portfolio", PortfolioView)
         return None
 
     def _active_selection_view(self):
@@ -2055,6 +2076,8 @@ class ProjectDash(App):
             return self.query_one(ContentSwitcher).query_one("#workload", WorkloadView)
         if current == "ideation":
             return self.query_one(ContentSwitcher).query_one("#ideation", IdeationGalleryView)
+        if current == "portfolio":
+            return self.query_one(ContentSwitcher).query_one("#portfolio", PortfolioView)
         return None
 
     def _execute_command(self, raw: str) -> None:

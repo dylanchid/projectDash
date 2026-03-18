@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import webbrowser
 import json
+import hashlib
 
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
@@ -261,6 +262,19 @@ class IssueFlowScreen(Screen):
             self._publish(False, "No pull request selected")
             return
         
+        # Guardrail: validate command env var
+        command_template = os.getenv("PD_AGENT_RUN_CMD", "").strip()
+        if not command_template:
+            await self.app.data_manager.record_action(
+                action_type="agent_launch_attempt",
+                target_id=pr.id,
+                status="failed",
+                message="PD_AGENT_RUN_CMD not set in environment",
+                payload={"pr_number": pr.number, "issue_id": pr.issue_id},
+            )
+            self._publish(False, "Agent command (PD_AGENT_RUN_CMD) not configured in environment.")
+            return
+
         async def do_run():
             issue = self._issue
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -288,20 +302,31 @@ class IssueFlowScreen(Screen):
                 },
             )
             try:
+                # Audit log the attempt
+                await self.app.data_manager.record_action(
+                    action_type="agent_launch_attempt",
+                    target_id=pr.id,
+                    status="success",
+                    message=f"Agent launch initiated by {actor_id}",
+                    payload={
+                        "pr_number": pr.number,
+                        "issue_id": pr.issue_id,
+                        "prompt": run.prompt_text,
+                    },
+                )
                 await self.app.data_manager.record_agent_run(run)
                 await self.app.data_manager.record_action(
                     action_type="agent_launch",
                     target_id=run.id,
                     status="success",
-                    message=f"Agent launch initiated by {actor_id}",
+                    message=f"Agent record created for {run.id}",
                     payload={
                         "issue_id": pr.issue_id,
                         "pr_number": pr.number,
-                        "prompt": run.prompt_text,
                     },
                 )
             except Exception as error:
-                self._publish(False, f"Failed to queue agent run: {error}")
+                self._publish(False, f"Failed to record agent run: {error}")
                 return
             self._agent_runs.insert(0, run)
             dispatched, dispatch_message = await self.app.data_manager.dispatch_agent_run(run)
@@ -599,10 +624,11 @@ class IssueFlowScreen(Screen):
                 )
 
         for run in agent_runs:
+            status_icon = self._agent_status_icon(run.status)
             entries.append(
                 FlowEntry(
                     kind="agent",
-                    label=f"Agent run {run.status} ({run.id})",
+                    label=f"Agent: {status_icon} {run.status} ({run.id})",
                     timestamp=run.started_at,
                     sort_key=self._parse_timestamp(run.started_at),
                     issue_id=run.issue_id,
@@ -626,6 +652,19 @@ class IssueFlowScreen(Screen):
         without_time = [entry for entry in entries if entry.sort_key is None]
         with_time.sort(key=lambda entry: entry.sort_key, reverse=True)
         return with_time + without_time
+
+    @staticmethod
+    def _agent_status_icon(status: str) -> str:
+        s = status.lower()
+        if s == "queued":
+            return "⏳"
+        if s == "running":
+            return "⚙️"
+        if s == "completed":
+            return "✅"
+        if s == "failed":
+            return "❌"
+        return "❓"
 
     @staticmethod
     def _checks_by_pr(checks: list[CiCheck]) -> dict[str, list[CiCheck]]:

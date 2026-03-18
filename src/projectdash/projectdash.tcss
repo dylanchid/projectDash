@@ -137,7 +137,8 @@ Screen {
 #github-layout,
 #timeline-layout,
 #workload-layout,
-#ideation-layout {
+#ideation-layout,
+#portfolio-layout {
     height: 1fr;
     width: 100%;
 }
@@ -146,7 +147,8 @@ Screen {
 #github-main,
 #timeline-main,
 #workload-main,
-#ideation-main {
+#ideation-main,
+#portfolio-main {
     width: 1fr;
     height: 1fr;
 }
@@ -307,6 +309,33 @@ Screen {
 
 .ideation-card-text {
     margin-bottom: 1;
+}
+
+#portfolio-main {
+    padding: 0 1 1 1;
+}
+
+#portfolio-toolbar {
+    min-height: 2;
+    margin: 0 1 1 1;
+    padding: 0 1;
+    border-bottom: ascii #222222;
+    color: #8d8d8d;
+}
+
+#portfolio-content {
+    padding: 0 1;
+    height: 1fr;
+}
+
+#portfolio-detail {
+    height: 1fr;
+    padding: 1 0;
+    color: #bbbbbb;
+}
+
+#portfolio-hint {
+    height: auto;
 }
 
 #github-summary {

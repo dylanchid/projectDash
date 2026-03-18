@@ -6,6 +6,7 @@ from typing import Any, List, Optional
 from projectdash.models import (
     AgentRun,
     CiCheck,
+    LocalProject,
     PullRequest,
     Repository,
     User,
@@ -185,6 +186,25 @@ class Database:
                     provider TEXT PRIMARY KEY,
                     cursor TEXT,
                     updated_at TEXT NOT NULL
+                )
+            """)
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS local_projects (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    path TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'active',
+                    tier TEXT NOT NULL DEFAULT 'C',
+                    type TEXT NOT NULL DEFAULT 'unknown',
+                    tags_json TEXT NOT NULL DEFAULT '[]',
+                    description TEXT,
+                    last_commit_at TEXT,
+                    has_readme INTEGER NOT NULL DEFAULT 0,
+                    has_tests INTEGER NOT NULL DEFAULT 0,
+                    has_ci INTEGER NOT NULL DEFAULT 0,
+                    linked_linear_id TEXT,
+                    linked_repo TEXT,
+                    created_at TEXT
                 )
             """)
             await db.execute(
@@ -806,3 +826,66 @@ class Database:
                         }
                     )
                 return history
+
+    async def save_local_projects(self, projects: list[LocalProject]) -> None:
+        if not projects:
+            return
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.executemany(
+                """
+                INSERT OR REPLACE INTO local_projects (
+                    id, name, path, status, tier, type, tags_json, description,
+                    last_commit_at, has_readme, has_tests, has_ci,
+                    linked_linear_id, linked_repo, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        p.id,
+                        p.name,
+                        p.path,
+                        p.status,
+                        p.tier,
+                        p.type,
+                        json.dumps(p.tags, sort_keys=True),
+                        p.description,
+                        p.last_commit_at,
+                        1 if p.has_readme else 0,
+                        1 if p.has_tests else 0,
+                        1 if p.has_ci else 0,
+                        p.linked_linear_id,
+                        p.linked_repo,
+                        p.created_at,
+                    )
+                    for p in projects
+                ],
+            )
+            await db.commit()
+
+    async def get_local_projects(self) -> list[LocalProject]:
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM local_projects ORDER BY tier, name"
+            ) as cursor:
+                rows = await cursor.fetchall()
+                return [
+                    LocalProject(
+                        id=row["id"],
+                        name=row["name"],
+                        path=row["path"],
+                        status=row["status"],
+                        tier=row["tier"],
+                        type=row["type"],
+                        tags=json.loads(row["tags_json"] or "[]"),
+                        description=row["description"],
+                        last_commit_at=row["last_commit_at"],
+                        has_readme=bool(row["has_readme"]),
+                        has_tests=bool(row["has_tests"]),
+                        has_ci=bool(row["has_ci"]),
+                        linked_linear_id=row["linked_linear_id"],
+                        linked_repo=row["linked_repo"],
+                        created_at=row["created_at"],
+                    )
+                    for row in rows
+                ]

@@ -72,7 +72,7 @@ def test_github_mode_cycles_through_all_views(monkeypatch) -> None:
         assert ok is True
         modes.append(view.visual_mode)
 
-    assert modes == ["prs", "checks", "repos"]
+    assert modes == ["prs", "failing_prs", "checks"]
 
 
 def test_ideation_mode_cycles_through_all_categories(monkeypatch) -> None:

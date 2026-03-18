@@ -14,6 +14,8 @@ ProjectDash can become an engineering command center where teams:
 - Review and ship work (GitHub PRs, CI status, approvals).
 - Measure delivery health (throughput, blockers, latency, ownership).
 
+A second, orthogonal expansion axis: **portfolio-level project management** — a top-level gallery of all a developer's software projects across their entire practice, not just those tracked in Linear. See `PORTFOLIO_VISION.md` for the full vision.
+
 ## Product Pillars
 1. Unified Work Graph
 - Merge issues, pull requests, commits, reviews, CI checks, and agent run events into one project timeline.
@@ -174,6 +176,7 @@ Use this section to evolve strategy decisions over time.
 | 2026-02-25 | Started platform foundation implementation: connector abstraction, expansion schema tables, and agent-run persistence primitives. | De-risk upcoming GitHub/runtime integration by putting core storage and extension points in place. | Team | Build GitHub read-only sync on top of the new schema/connector surfaces. |
 | 2026-02-25 | Added read-only GitHub connector flow (repos, PRs, checks), CLI sync path, and issue-detail PR linkage in Sprint view. | Deliver first cross-system bridge between planning and code delivery surfaces. | Team | Add dedicated Issue ↔ PR timeline screen and PR review cockpit interactions. |
 | 2026-02-26 | Added PRD v0.2 persona/use-case prioritization with P0/P1/P2 cutline and 8-week plan. | Force scope discipline around Issue -> PR -> Merge loop before broader platform features. | Team | Convert P0 scope into implementation tickets and acceptance metrics. |
+| 2026-03-17 | Created `PORTFOLIO_VISION.md` — portfolio gallery as top-level project manager. | New product direction: ProjectDash as the command center for a developer's entire software practice, not just Linear-tracked projects. Includes LocalProject model, tier/status/type taxonomies, filesystem discovery, and agentic integration. | Team | Resolve open questions in PORTFOLIO_VISION.md, define MVP scope, plan new top-level tab or IdeationGallery repurposing. |
 
 ## Next Update Triggers
 - Major scope change in integrations or runtime direction.

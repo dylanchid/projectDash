@@ -7,7 +7,8 @@ from datetime import date, datetime, timedelta, timezone
 from projectdash.config import AppConfig
 from projectdash.data import DataManager
 from projectdash.enums import CiConclusion, PullRequestState, WorkloadStatus
-from projectdash.models import CiCheck, Issue, Project, PullRequest, User
+from projectdash.models import CiCheck, Issue, LocalProject, Project, PullRequest, User
+from projectdash.services.portfolio_scanner import compute_activity_score
 
 
 @dataclass(frozen=True)
@@ -110,6 +111,36 @@ class TimelineMetricSet:
     title: str
     subtitle: str
     project_lines: list[TimelineProjectMetric]
+
+
+@dataclass(frozen=True)
+class PortfolioRowMetric:
+    project_id: str
+    name: str
+    tier: str
+    status: str
+    type: str
+    last_commit_label: str
+    activity_score: int
+    has_readme: bool
+    has_tests: bool
+    has_ci: bool
+    divergence_signal: str
+    linked_linear_id: str | None
+    linked_repo: str | None
+    path: str
+    tags: list[str] = field(default_factory=list)
+    description: str | None = None
+
+
+@dataclass(frozen=True)
+class PortfolioMetricSet:
+    rows: list[PortfolioRowMetric]
+    total: int
+    active_count: int
+    stale_flagships: int
+    divergence_count: int
+    tier_distribution: dict[str, int] = field(default_factory=dict)
 
 
 class MetricsService:
@@ -350,6 +381,123 @@ class MetricsService:
             subtitle=subtitle,
             project_lines=lines,
         )
+
+    def portfolio(
+        self,
+        data: DataManager,
+        *,
+        status_filter: str = "all",
+        tier_filter: str = "all",
+        sort_mode: str = "tier",
+    ) -> PortfolioMetricSet:
+        projects = data.get_local_projects()
+        if status_filter == "ideas":
+            projects = [p for p in projects if p.status in ("idea", "exploration")]
+        elif status_filter != "all":
+            projects = [p for p in projects if p.status == status_filter]
+        if tier_filter != "all":
+            projects = [p for p in projects if p.tier == tier_filter]
+
+        tier_order = {"S": 0, "A": 1, "B": 2, "C": 3, "D": 4}
+        rows: list[PortfolioRowMetric] = []
+        stale_flagships = 0
+        divergence_count = 0
+        active_count = 0
+        tier_distribution: dict[str, int] = {}
+        for p in projects:
+            score = compute_activity_score(p)
+            commit_label = self._relative_time_label(p.last_commit_at)
+            signal = self._divergence_signal(p, score)
+            if signal:
+                divergence_count += 1
+            if signal == "stale-flagship":
+                stale_flagships += 1
+            if p.status == "active":
+                active_count += 1
+            tier_distribution[p.tier] = tier_distribution.get(p.tier, 0) + 1
+            rows.append(
+                PortfolioRowMetric(
+                    project_id=p.id,
+                    name=p.name,
+                    tier=p.tier,
+                    status=p.status,
+                    type=p.type,
+                    last_commit_label=commit_label,
+                    activity_score=score,
+                    has_readme=p.has_readme,
+                    has_tests=p.has_tests,
+                    has_ci=p.has_ci,
+                    divergence_signal=signal,
+                    linked_linear_id=p.linked_linear_id,
+                    linked_repo=p.linked_repo,
+                    path=p.path,
+                    tags=list(p.tags),
+                    description=p.description,
+                )
+            )
+
+        if sort_mode == "score":
+            rows.sort(key=lambda r: -r.activity_score)
+        elif sort_mode == "commit":
+            rows.sort(key=lambda r: r.last_commit_label if r.last_commit_label != "never" else "zzz")
+        elif sort_mode == "name":
+            rows.sort(key=lambda r: r.name.lower())
+        else:
+            rows.sort(key=lambda r: (tier_order.get(r.tier, 9), -r.activity_score))
+
+        return PortfolioMetricSet(
+            rows=rows,
+            total=len(rows),
+            active_count=active_count,
+            stale_flagships=stale_flagships,
+            divergence_count=divergence_count,
+            tier_distribution=tier_distribution,
+        )
+
+    def _divergence_signal(self, project: LocalProject, score: int) -> str:
+        now = datetime.now(timezone.utc)
+        commit_age_days: int | None = None
+        if project.last_commit_at:
+            try:
+                commit_dt = datetime.fromisoformat(project.last_commit_at)
+                if commit_dt.tzinfo is None:
+                    commit_dt = commit_dt.replace(tzinfo=timezone.utc)
+                commit_age_days = (now - commit_dt).days
+            except (ValueError, TypeError):
+                pass
+        if project.tier in ("S", "A"):
+            if commit_age_days is not None and commit_age_days >= 30:
+                return "stale-flagship"
+            if score < 50:
+                return "unproven-flagship"
+        if project.tier in ("C", "D"):
+            if commit_age_days is not None and commit_age_days < 7:
+                return "overactive-low-tier"
+        return ""
+
+    def _relative_time_label(self, timestamp: str | None) -> str:
+        if not timestamp:
+            return "never"
+        try:
+            dt = datetime.fromisoformat(timestamp)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            delta = datetime.now(timezone.utc) - dt
+            hours = int(delta.total_seconds() / 3600)
+            if hours < 1:
+                return "just now"
+            if hours < 24:
+                return f"{hours}h ago"
+            days = delta.days
+            if days < 30:
+                return f"{days}d ago"
+            months = days // 30
+            if months < 12:
+                return f"{months}mo ago"
+            years = days // 365
+            return f"{years}yr ago"
+        except (ValueError, TypeError):
+            return "never"
 
     def _timeline_projects(self, projects: list[Project], project_id: str | None = None) -> list[Project]:
         if project_id:

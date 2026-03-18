@@ -141,6 +141,25 @@ class ActionRecord:
     payload: dict[str, Any] = field(default_factory=dict)
 
 @dataclass
+class LocalProject:
+    id: str
+    name: str
+    path: str
+    status: str = "active"
+    tier: str = "C"
+    type: str = "unknown"
+    tags: list[str] = field(default_factory=list)
+    description: str | None = None
+    last_commit_at: str | None = None
+    has_readme: bool = False
+    has_tests: bool = False
+    has_ci: bool = False
+    linked_linear_id: str | None = None
+    linked_repo: str | None = None
+    created_at: str | None = None
+
+
+@dataclass
 class AgentRun:
     id: str
     runtime: str

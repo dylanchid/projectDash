@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from typing import Any, List
-from projectdash.models import AgentRun, CiCheck, PullRequest, Repository, Project, Issue, User, LinearWorkflowState
+from projectdash.models import AgentRun, CiCheck, LocalProject, PullRequest, Repository, Project, Issue, User, LinearWorkflowState
 from projectdash.database import Database
 from projectdash.connectors import GitHubConnector, LinearConnector
 from projectdash.github import GitHubApiError, GitHubClient
@@ -40,6 +40,7 @@ class DataManager:
         self.repositories: List[Repository] = []
         self.pull_requests: List[PullRequest] = []
         self.ci_checks: List[CiCheck] = []
+        self.local_projects: list[LocalProject] = []
         self.workflow_states_by_team: dict[str, list[LinearWorkflowState]] = {}
         self.is_initialized = False
         self.sync_in_progress = False
@@ -164,6 +165,7 @@ class DataManager:
             workflow_states_by_team.setdefault(state.team_id, []).append(state)
         self.workflow_states_by_team = workflow_states_by_team
         self.sync_history = await self.db.get_sync_history()
+        self.local_projects = await self.db.get_local_projects()
 
     async def sync_with_linear(self):
         """Fetches latest data from Linear and updates the cache."""
@@ -216,6 +218,58 @@ class DataManager:
 
     async def get_action_history(self, limit: int = 50) -> list[ActionRecord]:
         return await self.db.get_action_history(limit)
+
+    def get_local_projects(self) -> list[LocalProject]:
+        return self.local_projects
+
+    async def scan_portfolio(self) -> None:
+        root_str = self.config.portfolio_root
+        if not root_str:
+            return
+        root = Path(root_str).expanduser()
+        if not root.is_dir():
+            return
+        from projectdash.services.portfolio_scanner import PortfolioScanner
+
+        scanner = PortfolioScanner()
+        scanned = scanner.scan_root(root)
+        manifest_path = self._resolved_manifest_path()
+        manifest = scanner.load_manifest(manifest_path)
+        merged = scanner.apply_manifest(scanned, manifest)
+        await self.db.save_local_projects(merged)
+        self.local_projects = await self.db.get_local_projects()
+
+    async def update_local_project_field(
+        self, project_id: str, field_name: str, value: str
+    ) -> tuple[bool, str]:
+        target = None
+        for p in self.local_projects:
+            if p.id == project_id:
+                target = p
+                break
+        if target is None:
+            return False, f"Project not found: {project_id}"
+        if field_name not in ("status", "tier", "type"):
+            return False, f"Cannot edit field: {field_name}"
+        setattr(target, field_name, value)
+        await self.db.save_local_projects([target])
+        from projectdash.services.portfolio_scanner import PortfolioScanner
+
+        scanner = PortfolioScanner()
+        manifest_path = self._resolved_manifest_path()
+        manifest = scanner.load_manifest(manifest_path)
+        entry = manifest.get(project_id, {})
+        if not isinstance(entry, dict):
+            entry = {}
+        entry[field_name] = value
+        manifest[project_id] = entry
+        scanner.save_manifest(manifest_path, manifest)
+        return True, f"Updated {field_name}={value} for {target.name}"
+
+    def _resolved_manifest_path(self) -> Path:
+        if self.config.portfolio_manifest_path:
+            return Path(self.config.portfolio_manifest_path).expanduser()
+        return Path.home() / ".projectdash" / "portfolio.json"
 
     async def get_agent_runs(self, limit: int = 50) -> list[AgentRun]:
         return await self.db.get_agent_runs(limit=limit)

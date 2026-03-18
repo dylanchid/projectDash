@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+import asyncio
 
 import pytest
 
@@ -20,6 +21,9 @@ class _FakeSprintView:
 
     def move_cursor(self, col_delta: int = 0, row_delta: int = 0) -> None:
         self.moves.append((col_delta, row_delta))
+
+    def current_issue(self):
+        return SimpleNamespace(id="T-1", title="Test Issue")
 
     async def close_selected_issue(self):
         self.closed_issue = True
@@ -157,7 +161,18 @@ async def test_sprint_close_issue_dispatches_to_active_sprint(monkeypatch) -> No
     monkeypatch.setattr(app, "_active_sprint_view", lambda: sprint)
     monkeypatch.setattr(app, "_publish_action_result", lambda ok, msg: published.append((ok, msg)))
 
+    def mock_push_screen(screen, callback) -> None:
+        if callback:
+            callback(True)
+    monkeypatch.setattr(app, "push_screen", mock_push_screen)
+
+    def mock_run_worker(coro, **kwargs):
+        app._worker_task = asyncio.create_task(coro)
+    monkeypatch.setattr(app, "run_worker", mock_run_worker)
+
     await app.action_sprint_close_issue()
+    if hasattr(app, "_worker_task"):
+        await app._worker_task
 
     assert sprint.closed_issue is True
     assert published == [(True, "closed")]
